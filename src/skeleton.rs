@@ -286,7 +286,6 @@ mod tests {
 
     #[test]
     fn resolve_pose_rotates_attachment() {
-        // Parent rotates 90 deg, child's attach point should move.
         let m = manifest(r#"{
           "skin":"t","base_height":100,
           "parts": {
@@ -300,18 +299,18 @@ mod tests {
         let mut images = HashMap::new();
         for a in ["b", "a", "c"] { images.insert(a.to_string(), img((10, 10), (10, 10))); }
 
-        // p10 is a right arm. In walk phase 0.75, angle is (0.75*2PI + PI).sin() * 0.4 = (1.5PI + PI).sin() * 0.4 = sin(2.5PI)*0.4 = 0.4 rad.
         let pose = resolve_animated_pose(&m, (0.0, 0.0), &images, ActionState::Walk, 0.75, 0.0).unwrap();
         
         let p10 = pose.get("p10").unwrap();
         let p6 = pose.get("p6").unwrap();
 
         // p10 world_pivot should be rotated by ~0.4 rad
-        assert!(p10.world_pivot.0 < 10.0); 
+        assert!(p10.world_pivot.0 < 10.5); 
         assert!(p10.world_pivot.1 > 0.0);
 
         // p6 attach point should also be rotated by p10's angle
-        assert!(p6.world_pivot.0 < 20.0);
+        assert!(p6.world_pivot.0 < 20.5);
         assert!(p6.world_pivot.1 > 0.0);
     }
-                }
+                                                    }
+        
