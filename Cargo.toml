@@ -1,0 +1,18 @@
+[package]
+name = "lkj-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# panic = "abort" jaan-boojh ke nahi lagaya: M5 ke retry/error handling
+# catch_unwind use kar sakte hain, aur FFmpeg (M4) integration mein
+# unwind zyada safe hai. Binary size pe asar ~0.2 MB — 50 MB limit mein koi farak nahi.
