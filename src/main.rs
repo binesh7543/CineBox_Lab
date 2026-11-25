@@ -195,6 +195,7 @@ mod tests {
                 h: 100,
             },
             characters: vec![],
+            timeline: vec![],
         }
     }
 
@@ -263,4 +264,4 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(effective_video(&job, &cfg), (1080, 1280));
     }
-      }
+                   }
