@@ -304,13 +304,14 @@ mod tests {
         let p10 = pose.get("p10").unwrap();
         let p6 = pose.get("p6").unwrap();
 
-        // p10 world_pivot should be rotated by ~0.4 rad
-        assert!(p10.world_pivot.0 < 10.5); 
-        assert!(p10.world_pivot.1 > 0.0);
+        // p10 ka pivot nahi ghumega kyunki uska parent (body) ruka hua hai.
+        assert!((p10.world_pivot.0 - 10.0).abs() < 1e-4); 
+        assert!((p10.world_pivot.1 - 0.0).abs() < 1e-4);
 
-        // p6 attach point should also be rotated by p10's angle
-        assert!(p6.world_pivot.0 < 20.5);
-        assert!(p6.world_pivot.1 > 0.0);
+        // p6 ka attach point ghumega kyunki uska parent (p10) 0.4 radian ghuma hai.
+        // 10 * cos(0.4) = 9.21 -> 10 + 9.21 = 19.21
+        // 10 * sin(0.4) = 3.89
+        assert!(p6.world_pivot.0 > 19.0 && p6.world_pivot.0 < 19.5);
+        assert!(p6.world_pivot.1 > 3.5 && p6.world_pivot.1 < 4.0);
     }
-                                                    }
-        
+}
