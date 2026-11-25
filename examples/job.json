@@ -1,10 +1,13 @@
 {
-  "job_id": "ci_test_001",
-  "video": { "w": 200, "h": 200, "fps": 15, "duration_sec": 1, "piece_sec": 5 },
+  "job_id": "m2_test_001",
+  "video": { "w": 200, "h": 200, "fps": 15, "duration_sec": 1.0 },
   "background": { "asset": "bg", "w": 200, "h": 200 },
-  "delivery": { "mode": "default_storage" },
   "characters": [
     { "id": "c1", "skin": "oggy", "height": 1.0, "x": 100, "y": 100 }
   ],
-  "timeline": []
+  "timeline": [
+    { "t": 0.0, "char": "c1", "action": "idle" },
+    { "t": 0.2, "char": "c1", "action": "walk", "to": { "x": 140, "y": 100 }, "dur": 0.5 },
+    { "t": 0.7, "char": "c1", "action": "wave", "dur": 0.3 }
+  ]
 }

@@ -1,23 +1,34 @@
-import zlib, struct, os
+from PIL import Image, ImageDraw
+import os
 
-def create_png(filename, width, height, rgba):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    def chunk(type, data):
-        return struct.pack('>I', len(data)) + type + data + struct.pack('>I', zlib.crc32(type + data))
-    
-    header = b'\x89PNG\r\n\x1a\n'
-    ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0))
-    raw_data = b''
-    for _ in range(height):
-        raw_data += b'\x00' + bytes(rgba) * width
-    idat = chunk(b'IDAT', zlib.compress(raw_data))
-    iend = chunk(b'IEND', b'')
-    
-    with open(filename, 'wb') as f:
-        f.write(header + ihdr + idat + iend)
+# Ensure directory exists
+os.makedirs("examples/oggy", exist_ok=True)
 
-# Generate solid color PNGs
-create_png("examples/bg.png", 200, 200, [0, 0, 255, 255])          # Blue BG
-create_png("examples/oggy/body.png", 40, 40, [255, 0, 0, 255])     # Red Body
-create_png("examples/oggy/part_10.png", 10, 10, [0, 255, 0, 255]) # Green Part
-print("Example assets generated successfully.")
+# Helper to create solid color image
+def create_img(path, w, h, color):
+    img = Image.new("RGBA", (w, h), color)
+    img.save(path)
+    print(f"Created {path}")
+
+# Background
+create_img("examples/bg.png", 200, 200, (0, 0, 255, 255)) # Blue
+
+# Body (Red)
+create_img("examples/oggy/body.png", 40, 60, (255, 0, 0, 255))
+
+# Head (Yellow)
+create_img("examples/oggy/part_9.png", 30, 30, (255, 255, 0, 255))
+
+# Right Arm parts (Green shoulder, Dark Green arm)
+create_img("examples/oggy/part_10.png", 15, 15, (0, 255, 0, 255))
+create_img("examples/oggy/part_6.png", 10, 30, (0, 128, 0, 255))
+
+# Left Arm parts (Magenta shoulder, Purple arm)
+create_img("examples/oggy/part_8.png", 15, 15, (255, 0, 255, 255))
+create_img("examples/oggy/part_5.png", 10, 30, (128, 0, 128, 255))
+
+# Legs (Brown, Black)
+create_img("examples/oggy/part_3.png", 12, 40, (165, 42, 42, 255))
+create_img("examples/oggy/part_4.png", 12, 40, (0, 0, 0, 255))
+
+print("All assets generated successfully!")

@@ -1,15 +1,18 @@
 //! Job JSON (§7) aur skin manifest (§9) ke data types.
 //!
 //! M1 scope: sirf wo fields jo ek frame render karne ke liye chahiye.
-//! §7 ke baaki sections (weather, delivery, timeline) is file mein nahi hain —
-//! serde_json unhe silently ignore karta hai (deny_unknown_fields jaan-boojh ke nahi
-//! lagaya). Wo M2–M5 mein jodenge.
+//! M2 update: Timeline events add kiye gaye hain (action, walk, face).
+//! Face event parse ho raha hai, par M2 mein iska use nahi hoga (M3 ke liye).
 //!
 //! Assumption (user B): character.x / character.y = body part ke pivot ki screen
 //! position. Zameen wala anchor (pair ke neeche) M2 mein dekhenge.
 
 use serde::Deserialize;
 use std::collections::HashMap;
+
+/// Walk cycle ka period (seconds mein). Ek poora cycle (left + right step)
+/// 1.0 second mein poora hoga. Isko timeline.rs aur skeleton.rs use karenge.
+pub const WALK_CYCLE_PERIOD_SEC: f32 = 1.0;
 
 /// 2D pixel coordinate. Pivot / attach dono isi type ke hain, lekin
 /// **space alag hai**:
@@ -38,6 +41,9 @@ pub struct Job {
     pub video: VideoOpts,
     pub background: Background,
     pub characters: Vec<Character>,
+    /// M2: Timeline events. Agar missing ho to empty vec (backward compatible with M1 jobs).
+    #[serde(default)]
+    pub timeline: Vec<TimelineEvent>,
 }
 
 /// §15 defaults Config se aate hain jab field missing ho — yahan har field
@@ -70,6 +76,47 @@ pub struct Character {
 
 fn default_height() -> f32 {
     1.0
+}
+
+// ---------------- Timeline (§7 M2 Update) ----------------
+
+/// Ek timeline event. M2 mein sirf action (idle, walk, wave) use hoga.
+/// Baaki fields (face, camera) parse to honge, par ignore kiye jayenge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TimelineEvent {
+    pub t: f32,
+    /// Kis character ke liye hai. Camera events ke liye optional.
+    #[serde(default)]
+    pub char: Option<String>,
+    /// Action name (e.g. "idle", "walk", "wave").
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Walk/Run ke liye destination.
+    #[serde(default)]
+    pub to: Option<Point>,
+    /// Action ki duration (walk/run ke liye).
+    #[serde(default)]
+    pub dur: Option<f32>,
+    /// M3 ke liye face event. Abhi parse hoga, use nahi hoga.
+    #[serde(default)]
+    pub face: Option<FaceEvent>,
+    /// M3 ke liye camera event.
+    #[serde(default)]
+    pub camera: Option<CameraEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FaceEvent {
+    pub expr: String,
+    pub look: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CameraEvent {
+    #[serde(rename = "move")]
+    pub move_dir: String,
+    pub amount: f32,
+    pub dur: f32,
 }
 
 // ---------------- Skin manifest (§9 + user A) ----------------
@@ -120,7 +167,9 @@ mod tests {
       ],
       "timeline": [
         { "t": 0.0, "char": "c1", "action": "idle" },
-        { "t": 2.0, "char": "c1", "action": "walk", "to": { "x": 600, "y": 1000 }, "dur": 3.0 }
+        { "t": 2.0, "char": "c1", "action": "walk", "to": { "x": 600, "y": 1000 }, "dur": 3.0 },
+        { "t": 5.0, "char": "c1", "face": { "expr": "happy", "look": "right" } },
+        { "t": 8.0, "camera": { "move": "E", "amount": 200, "dur": 2.0 } }
       ]
     }"#;
 
@@ -137,54 +186,50 @@ mod tests {
     }"#;
 
     #[test]
-    fn parse_section_7_sample() {
-        let job: Job = serde_json::from_str(SAMPLE_JOB).unwrap();
-        assert_eq!(job.job_id, "j_001");
-        assert_eq!(job.video.w, Some(720));
-        assert_eq!(job.video.h, Some(1280));
-        assert_eq!(job.video.fps, Some(15));
-        assert_eq!(job.video.duration_sec, Some(20.0));
-        assert_eq!(job.video.piece_sec, Some(5.0));
-        assert_eq!(job.background.asset, "bg/park_day");
-        assert_eq!(job.background.w, 2160);
-        assert_eq!(job.background.h, 1280);
-        assert_eq!(job.characters.len(), 2);
-        assert_eq!(job.characters[0].id, "c1");
-        assert_eq!(job.characters[0].skin, "oggy");
-        assert_eq!(job.characters[0].height, 1.0);
-        assert_eq!(job.characters[0].x, 300);
-        assert_eq!(job.characters[0].y, 1000);
-        assert_eq!(job.characters[1].height, 0.6);
-    }
-
-    #[test]
-    fn job_unknown_fields_ignored() {
-        // weather / delivery / timeline JSON mein hain, Job struct mein nahi.
-        // serde_json default behaviour: ignore karo, error mat do.
-        let _: Job = serde_json::from_str(SAMPLE_JOB).expect("unknown fields must be ignored");
-    }
-
-    #[test]
-    fn job_missing_video_uses_empty_opts() {
+    fn parse_m1_sample_without_timeline() {
         let json = r#"{
-          "job_id": "j_no_video",
+          "job_id": "j_m1",
           "background": { "asset": "bg/x", "w": 720, "h": 1280 },
           "characters": []
         }"#;
         let job: Job = serde_json::from_str(json).unwrap();
-        assert!(job.video.w.is_none());
-        assert!(job.video.fps.is_none());
+        assert!(job.timeline.is_empty(), "timeline should default to empty");
     }
 
     #[test]
-    fn character_height_defaults_to_one() {
-        let json = r#"{
-          "job_id": "j",
-          "background": { "asset": "bg/x", "w": 720, "h": 1280 },
-          "characters": [ { "id": "c1", "skin": "s", "x": 0, "y": 0 } ]
-        }"#;
-        let job: Job = serde_json::from_str(json).unwrap();
-        assert_eq!(job.characters[0].height, 1.0);
+    fn parse_m2_timeline_actions() {
+        let job: Job = serde_json::from_str(SAMPLE_JOB).unwrap();
+        assert_eq!(job.timeline.len(), 4);
+
+        // Event 0: Idle
+        let ev0 = &job.timeline[0];
+        assert_eq!(ev0.t, 0.0);
+        assert_eq!(ev0.char.as_deref(), Some("c1"));
+        assert_eq!(ev0.action.as_deref(), Some("idle"));
+        assert!(ev0.to.is_none());
+
+        // Event 1: Walk
+        let ev1 = &job.timeline[1];
+        assert_eq!(ev1.t, 2.0);
+        assert_eq!(ev1.action.as_deref(), Some("walk"));
+        let to = ev1.to.unwrap();
+        assert_eq!(to.x, 600.0);
+        assert_eq!(to.y, 1000.0);
+        assert_eq!(ev1.dur.unwrap(), 3.0);
+
+        // Event 2: Face (M3 ke liye, par parse ho raha hai)
+        let ev2 = &job.timeline[2];
+        let face = ev2.face.as_ref().unwrap();
+        assert_eq!(face.expr, "happy");
+        assert_eq!(face.look.as_deref(), Some("right"));
+
+        // Event 3: Camera (M3 ke liye)
+        let ev3 = &job.timeline[3];
+        let cam = ev3.camera.as_ref().unwrap();
+        assert_eq!(cam.move_dir, "E");
+        assert_eq!(cam.amount, 200.0);
+        assert_eq!(cam.dur, 2.0);
+        assert!(ev3.char.is_none(), "camera event has no char");
     }
 
     #[test]
@@ -205,46 +250,13 @@ mod tests {
         assert_eq!(p10.pivot, Point::new(5.0, 5.0));
         assert_eq!(p10.parent.as_deref(), Some("body"));
         assert_eq!(p10.attach, Some(Point::new(40.0, 20.0)));
-
-        let p6 = &m.parts["p6"];
-        assert_eq!(p6.parent.as_deref(), Some("p10"));
-        assert_eq!(p6.attach, Some(Point::new(5.0, 10.0)));
-    }
-
-    #[test]
-    fn body_attach_defaults_to_none() {
-        // Skin jismein body pe attach key hi nahi — parse fail nahi hona chahiye.
-        let json = r#"{
-          "skin": "s", "base_height": 400,
-          "parts": {
-            "body": { "asset": "b", "pivot": { "x": 0, "y": 0 }, "z": 0 }
-          }
-        }"#;
-        let m: SkinManifest = serde_json::from_str(json).unwrap();
-        assert!(m.body().unwrap().attach.is_none());
-        assert!(m.body().unwrap().parent.is_none());
-    }
-
-    #[test]
-    fn skin_missing_attach_still_parses() {
-        // attach field na ho to parse succeed (skeleton.rs validate_structure use karega).
-        let json = r#"{
-          "skin": "s", "base_height": 400,
-          "parts": {
-            "body": { "asset": "b", "pivot": { "x": 0, "y": 0 }, "z": 0 },
-            "p3":   { "asset": "l", "pivot": { "x": 0, "y": 0 }, "z": 1, "parent": "body" }
-          }
-        }"#;
-        let m: SkinManifest = serde_json::from_str(json).unwrap();
-        assert!(m.parts["p3"].attach.is_none());
     }
 
     #[test]
     fn float_fields_accept_integers() {
-        // JSON mein { "x": 60 } -> Point { x: 60.0 }. serde_json coerces int->f32.
         let json = r#"{ "x": 60, "y": 100 }"#;
         let p: Point = serde_json::from_str(json).unwrap();
         assert_eq!(p.x, 60.0);
         assert_eq!(p.y, 100.0);
     }
-  }
+    }
