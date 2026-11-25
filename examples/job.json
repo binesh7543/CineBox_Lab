@@ -1,0 +1,10 @@
+{
+  "job_id": "ci_test_001",
+  "video": { "w": 200, "h": 200, "fps": 15, "duration_sec": 1, "piece_sec": 5 },
+  "background": { "asset": "bg", "w": 200, "h": 200 },
+  "delivery": { "mode": "default_storage" },
+  "characters": [
+    { "id": "c1", "skin": "oggy", "height": 1.0, "x": 100, "y": 100 }
+  ],
+  "timeline": []
+}
