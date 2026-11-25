@@ -1,10 +1,10 @@
-name: M1 Build and Test
+name: M2 Build and Test
 
 on:
   push:
-    branches: [ "m1-core-types" ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ "m1-core-types", "main" ]
+    branches: [ "**" ]
 
 jobs:
   test-and-build:
@@ -19,6 +19,9 @@ jobs:
 
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
+
+    - name: Install Python dependencies
+      run: pip install pillow
 
     - name: Run tests
       run: cargo test --all-targets
@@ -35,8 +38,14 @@ jobs:
     - name: Run Render Engine on Example
       run: ./target/release/lkj-engine examples/job.json examples/out.png examples/
 
-    - name: Upload Output Frame as Artifact
+    - name: Generate Contact Sheet
+      run: python3 examples/make_contact_sheet.py
+
+    - name: Upload Output Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: m1-rendered-frame
-        path: examples/out.png
+        name: m2-rendered-outputs
+        path: |
+          examples/out.png
+          examples/contact_sheet.png
+          
