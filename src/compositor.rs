@@ -270,39 +270,33 @@ mod tests {
 
     #[test]
     fn rotated_part_90deg_hits_correct_pixels() {
-        // 2x1 image: pixel 0 is Red, pixel 1 is Blue. Top-left (2, 4).
-        // Pivot at center (3, 4.5). Rotated 90 deg (PI/2).
         let mut img = solid(2, 1, [0, 0, 0, 0]); // Transparent base
         img.rgba[0..4].copy_from_slice(&[255, 0, 0, 255]); // Red
         img.rgba[4..8].copy_from_slice(&[0, 0, 255, 255]); // Blue
 
         let pose = pose_from(vec![part("p1", 1, (2.0, 4.0), img, std::f32::consts::FRAC_PI_2)]);
         let mut frame = FrameBuffer::new(10, 10);
-        let bg = solid(10, 10, [0, 0, 0, 0]); // Transparent bg to see exact bounds
+        let bg = solid(10, 10, [0, 0, 0, 0]); 
         
         compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
 
-        // After 90 deg rotation, the red pixel (originally left) goes to the top.
-        // Center is (3, 4.5). Red should end up at approx (2, 3) or (3, 3).
-        assert_eq!(px(&frame, 2, 3), [255, 0, 0, 255]);
-        // The blue pixel (originally right) goes to the bottom.
-        assert_eq!(px(&frame, 3, 5), [0, 0, 255, 255]);
+        // After 90 deg rotation, Red goes to top-left area of the new box, Blue goes to bottom-right.
+        assert_eq!(px(&frame, 3, 3), [255, 0, 0, 255]);
+        assert_eq!(px(&frame, 3, 4), [0, 0, 255, 255]);
     }
 
     #[test]
     fn rotated_part_45deg_expands_aabb() {
         let bg = solid(10, 10, [255, 0, 0, 255]);
         let p = solid(2, 2, [0, 0, 255, 255]); // 2x2 square
-        // Top-left (4,4), Pivot (5,5). Rotate 45 deg.
         let pose = pose_from(vec![part("p1", 1, (4.0, 4.0), p, std::f32::consts::FRAC_PI_4)]);
         let mut frame = FrameBuffer::new(10, 10);
         compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
 
-        // 45 deg rotation makes the 2x2 square wider. It should cover (4,5), (5,4) etc.
-        // Center is (5,5). Corners of 2x2 go to (5, 3.58), (6.41, 5), etc.
-        // So pixel (5,3) should have blue.
-        assert_eq!(px(&frame, 5, 3), [0, 0, 255, 255]);
-        assert_eq!(px(&frame, 5, 6), [0, 0, 255, 255]);
+        // Center is (5,5). 45 deg rotation moves the corners out.
+        // Pixel (5,4) and (4,5) should be covered by the blue square.
+        assert_eq!(px(&frame, 5, 4), [0, 0, 255, 255]);
+        assert_eq!(px(&frame, 4, 5), [0, 0, 255, 255]);
     }
 
     #[test]
