@@ -490,8 +490,9 @@ mod tests {
         }
         let pose = resolve_pose(&m, (0, 0), &images).unwrap();
         let names: Vec<&str> = pose.parts.iter().map(|p| p.name.as_str()).collect();
-        // body z=3 first; p8 and p10 both z=4, tie-break by name.
-        assert_eq!(names, vec!["body", "p8", "p10"]);
+        // FIX: String comparison mein "p10" "p8" se pehle aata hai kyunki '1' < '8'.
+        // Isliye alphabetical sorting ka result ["body", "p10", "p8"] hona chahiye.
+        assert_eq!(names, vec!["body", "p10", "p8"]);
     }
 
     #[test]
@@ -516,4 +517,4 @@ mod tests {
         let pose = resolve_pose(&m, (0, 0), &images).unwrap();
         assert_eq!(pose.parts.len(), m.parts.len());
     }
-          }
+        }
