@@ -1,0 +1,25 @@
+{
+  "skin": "oggy",
+  "base_height": 400,
+  "parts": {
+    "body": { "asset": "oggy/body", "pivot": { "x": 20, "y": 30 }, "z": 3 },
+    
+    "p9":  { "asset": "oggy/part_9", "pivot": { "x": 15, "y": 15 }, "z": 4, 
+             "parent": "body", "attach": { "x": 20, "y": 0 } },
+             
+    "p10": { "asset": "oggy/part_10", "pivot": { "x": 7.5, "y": 7.5 }, "z": 2, 
+             "parent": "body", "attach": { "x": 35, "y": 10 } },
+    "p6":  { "asset": "oggy/part_6", "pivot": { "x": 5, "y": 0 }, "z": 1, 
+             "parent": "p10", "attach": { "x": 7.5, "y": 15 } },
+             
+    "p8":  { "asset": "oggy/part_8", "pivot": { "x": 7.5, "y": 7.5 }, "z": 2, 
+             "parent": "body", "attach": { "x": 5, "y": 10 } },
+    "p5":  { "asset": "oggy/part_5", "pivot": { "x": 5, "y": 0 }, "z": 1, 
+             "parent": "p8", "attach": { "x": 7.5, "y": 15 } },
+             
+    "p3":  { "asset": "oggy/part_3", "pivot": { "x": 6, "y": 0 }, "z": 1, 
+             "parent": "body", "attach": { "x": 30, "y": 60 } },
+    "p4":  { "asset": "oggy/part_4", "pivot": { "x": 6, "y": 0 }, "z": 1, 
+             "parent": "body", "attach": { "x": 10, "y": 60 } }
+  }
+}
