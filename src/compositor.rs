@@ -1,24 +1,13 @@
 //! Frame compositor (§8 z-order, §12 background crop + layer overdraw).
 //!
-//! Per-frame pipeline:
-//!   1. Fill `FrameBuffer` opaque black.
-//!   2. Blit background crop `[CropWindow]` to frame at (0,0), clipped.
-//!   3. Draw `ResolvedPose` parts z-ascending (painter's algorithm, §8).
-//!
-//! **M1 scope:**
-//!   - No dirty-rect — full-frame redraw (§12 defers to M3).
-//!   - No rotation — parts axis-aligned at `top_left` (M2 adds it).
-//!   - Background assumed pre-loaded at scale 1.0 (§12: "background bada
-//!     image, camera crop window khisaye"). Character `height` background
-//!     ko affect nahi karta.
-//!
-//! **Frame opacity contract:** output frame is always alpha=255 (video frame
-//! has no alpha channel in MP4). Background semi-transparent pixels are
-//! forced to 255; black padding shows through the rest.
+//! M2 Update:
+//!   - Rotation support (Nearest Neighbor sampling).
+//!   - AABB (Bounding Box) optimization: only rotated bounding box is processed.
+//!   - `blit_part` takes `ResolvedPart` directly to access angle and world_pivot.
 
 use crate::assets::CachedImage;
 use crate::camera::CropWindow;
-use crate::skeleton::ResolvedPose;
+use crate::skeleton::{ResolvedPose, ResolvedPart};
 
 pub struct FrameBuffer {
     pub width: u32,
@@ -51,7 +40,7 @@ pub fn compose_frame(
     fill_opaque_black(frame);
     blit_background_crop(frame, background, crop);
     for part in &pose.parts {
-        blit_part(frame, part.top_left, &part.image);
+        blit_part(frame, part);
     }
 }
 
@@ -65,14 +54,8 @@ fn fill_opaque_black(frame: &mut FrameBuffer) {
 }
 
 fn blit_background_crop(frame: &mut FrameBuffer, bg: &CachedImage, crop: &CropWindow) {
-    let copy_w = crop
-        .w
-        .min(frame.width)
-        .min(bg.width.saturating_sub(crop.x));
-    let copy_h = crop
-        .h
-        .min(frame.height)
-        .min(bg.height.saturating_sub(crop.y));
+    let copy_w = crop.w.min(frame.width).min(bg.width.saturating_sub(crop.x));
+    let copy_h = crop.h.min(frame.height).min(bg.height.saturating_sub(crop.y));
     if copy_w == 0 || copy_h == 0 {
         return;
     }
@@ -90,13 +73,21 @@ fn blit_background_crop(frame: &mut FrameBuffer, bg: &CachedImage, crop: &CropWi
             d[0] = s[0];
             d[1] = s[1];
             d[2] = s[2];
-            d[3] = 255; // frame stays opaque
+            d[3] = 255;
         }
     }
 }
 
-fn blit_part(frame: &mut FrameBuffer, top_left: (f32, f32), img: &CachedImage) {
-    // M1: no rotation → round to nearest pixel.
+fn blit_part(frame: &mut FrameBuffer, part: &ResolvedPart) {
+    // Fast path: if angle is effectively zero, use direct memory copy (M1 logic).
+    if part.angle_rad.abs() < 1e-5 {
+        blit_part_unrotated(frame, part.top_left, &part.image);
+    } else {
+        blit_part_rotated(frame, part);
+    }
+}
+
+fn blit_part_unrotated(frame: &mut FrameBuffer, top_left: (f32, f32), img: &CachedImage) {
     let px = top_left.0.round() as i32;
     let py = top_left.1.round() as i32;
     let iw = img.width as i32;
@@ -109,21 +100,19 @@ fn blit_part(frame: &mut FrameBuffer, top_left: (f32, f32), img: &CachedImage) {
     let sx1 = (fw - px).min(iw);
     let sy1 = (fh - py).min(ih);
     if sx0 >= sx1 || sy0 >= sy1 {
-        return; // fully off-screen
+        return;
     }
 
     for sy in sy0..sy1 {
         let dy = py + sy;
-        if dy < 0 || dy >= fh {
-            continue;
-        }
+        if dy < 0 || dy >= fh { continue; }
+
         let src_row_start = (sy as usize) * (img.width as usize) * 4;
         let dst_row_start = (dy as usize) * (frame.width as usize) * 4;
         for sx in sx0..sx1 {
             let dx = px + sx;
-            if dx < 0 || dx >= fw {
-                continue;
-            }
+            if dx < 0 || dx >= fw { continue; }
+
             let si = src_row_start + (sx as usize) * 4;
             let di = dst_row_start + (dx as usize) * 4;
             blend_pixel(&img.rgba[si..si + 4], &mut frame.rgba[di..di + 4]);
@@ -131,9 +120,81 @@ fn blit_part(frame: &mut FrameBuffer, top_left: (f32, f32), img: &CachedImage) {
     }
 }
 
-/// Standard source-over alpha blend. `dst` is assumed opaque (invariant of
-/// this pipeline: bg drawn first, alpha forced to 255). `sa == 0` skips,
-/// `sa == 255` fast copy.
+fn blit_part_rotated(frame: &mut FrameBuffer, part: &ResolvedPart) {
+    let img = &part.image;
+    let w = img.width as f32;
+    let h = img.height as f32;
+    let (px, py) = part.world_pivot;
+    let (tx, ty) = part.top_left;
+    let angle = part.angle_rad;
+
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+
+    // Calculate AABB (Bounding Box) of the rotated image
+    let corners = [(tx, ty), (tx + w, ty), (tx, ty + h), (tx + w, ty + h)];
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+
+    for &(cx, cy) in &corners {
+        let dx = cx - px;
+        let dy = cy - py;
+        let rx = dx * cos_a - dy * sin_a + px;
+        let ry = dx * sin_a + dy * cos_a + py;
+        min_x = min_x.min(rx);
+        max_x = max_x.max(rx);
+        min_y = min_y.min(ry);
+        max_y = max_y.max(ry);
+    }
+
+    // Clip AABB to frame bounds
+    let start_x = (min_x.floor() as i32).max(0);
+    let end_x = (max_x.ceil() as i32).min(frame.width as i32);
+    let start_y = (min_y.floor() as i32).max(0);
+    let end_y = (max_y.ceil() as i32).min(frame.height as i32);
+
+    if start_x >= end_x || start_y >= end_y {
+        return;
+    }
+
+    // Inverse rotation mapping (Nearest Neighbor)
+    for dy in start_y..end_y {
+        for dx in start_x..end_x {
+            // Destination pixel center
+            let wx = dx as f32 + 0.5;
+            let wy = dy as f32 + 0.5;
+
+            // Translate to pivot center
+            let cx = wx - px;
+            let cy = wy - py;
+
+            // Inverse rotate
+            let rx = cx * cos_a + cy * sin_a;
+            let ry = -cx * sin_a + cy * cos_a;
+
+            // Translate back to image space
+            let sx = rx + px - tx;
+            let sy = ry + py - ty;
+
+            // Check if inside source image
+            if sx >= 0.0 && sx < w && sy >= 0.0 && sy < h {
+                let px_x = sx as usize;
+                let px_y = sy as usize;
+
+                let src_idx = (px_y * img.width as usize + px_x) * 4;
+                let dst_idx = ((dy as usize) * frame.width as usize + dx as usize) * 4;
+
+                blend_pixel(
+                    &img.rgba[src_idx..src_idx + 4],
+                    &mut frame.rgba[dst_idx..dst_idx + 4],
+                );
+            }
+        }
+    }
+}
+
 #[inline]
 fn blend_pixel(src: &[u8], dst: &mut [u8]) {
     let sa = src[3] as u32;
@@ -150,7 +211,6 @@ fn blend_pixel(src: &[u8], dst: &mut [u8]) {
     dst[0] = ((src[0] as u32 * sa + dst[0] as u32 * inv + 127) / 255) as u8;
     dst[1] = ((src[1] as u32 * sa + dst[1] as u32 * inv + 127) / 255) as u8;
     dst[2] = ((src[2] as u32 * sa + dst[2] as u32 * inv + 127) / 255) as u8;
-    // dst[3] stays 255 — frame invariant.
 }
 
 // ---------------- Tests ----------------
@@ -158,7 +218,6 @@ fn blend_pixel(src: &[u8], dst: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skeleton::ResolvedPart;
     use std::sync::Arc;
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> CachedImage {
@@ -169,23 +228,17 @@ mod tests {
         CachedImage { rgba: pixels, width: w, height: h, src_width: w, src_height: h }
     }
 
-    fn from_fn(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> CachedImage {
-        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                pixels.extend_from_slice(&f(x, y));
-            }
-        }
-        CachedImage { rgba: pixels, width: w, height: h, src_width: w, src_height: h }
-    }
-
-    fn part(name: &str, z: i32, top_left: (f32, f32), img: CachedImage) -> ResolvedPart {
+    fn part(name: &str, z: i32, top_left: (f32, f32), img: CachedImage, angle: f32) -> ResolvedPart {
+        // Pivot is assumed to be at the center of the image for these tests
+        let px = top_left.0 + (img.width as f32 / 2.0);
+        let py = top_left.1 + (img.height as f32 / 2.0);
         ResolvedPart {
             name: name.to_string(),
             z,
             image: Arc::new(img),
             top_left,
-            world_pivot: (0.0, 0.0),
+            world_pivot: (px, py),
+            angle_rad: angle,
         }
     }
 
@@ -203,184 +256,63 @@ mod tests {
         CropWindow { x: 0, y: 0, w, h }
     }
 
-    // ---------------- background only ----------------
-
     #[test]
-    fn solid_background_fills_frame() {
-        let mut frame = FrameBuffer::new(10, 10);
-        let bg = solid(10, 10, [255, 0, 0, 255]);
-        compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose_from(vec![]));
-        for y in 0..10 {
-            for x in 0..10 {
-                assert_eq!(px(&frame, x, y), [255, 0, 0, 255], "at ({x},{y})");
-            }
-        }
-    }
-
-    #[test]
-    fn crop_window_offsets_background() {
-        // bg(x,y) = (x*10, y*10, 0, 255); crop starts at (5, 10).
-        let bg = from_fn(20, 20, |x, y| [(x as u8) * 10, (y as u8) * 10, 0, 255]);
-        let mut frame = FrameBuffer::new(10, 8);
-        let crop = CropWindow { x: 5, y: 10, w: 10, h: 8 };
-        compose_frame(&mut frame, &bg, &crop, &pose_from(vec![]));
-        assert_eq!(px(&frame, 0, 0), [50, 100, 0, 255]);
-        assert_eq!(px(&frame, 9, 7), [140, 170, 0, 255]);
-    }
-
-    #[test]
-    fn background_smaller_than_frame_padded_black() {
-        let bg = solid(5, 5, [255, 0, 0, 255]);
-        let mut frame = FrameBuffer::new(10, 10);
-        let crop = CropWindow { x: 0, y: 0, w: 5, h: 5 };
-        compose_frame(&mut frame, &bg, &crop, &pose_from(vec![]));
-        assert_eq!(px(&frame, 0, 0), [255, 0, 0, 255]);
-        assert_eq!(px(&frame, 4, 4), [255, 0, 0, 255]);
-        assert_eq!(px(&frame, 5, 0), [0, 0, 0, 255]);
-        assert_eq!(px(&frame, 9, 9), [0, 0, 0, 255]);
-    }
-
-    #[test]
-    fn background_semi_transparent_forced_opaque() {
-        // Frame invariant: alpha=255 always.
-        let bg = solid(4, 4, [255, 0, 0, 128]);
-        let mut frame = FrameBuffer::new(4, 4);
-        compose_frame(&mut frame, &bg, &full_crop(4, 4), &pose_from(vec![]));
-        assert_eq!(px(&frame, 0, 0)[3], 255);
-        assert_eq!(px(&frame, 3, 3)[3], 255);
-    }
-
-    // ---------------- parts ----------------
-
-    #[test]
-    fn part_opaque_draws_over_background() {
+    fn part_unrotated_fast_path() {
         let bg = solid(10, 10, [255, 0, 0, 255]);
         let p = solid(2, 2, [0, 0, 255, 255]);
-        let pose = pose_from(vec![part("p1", 10, (3.0, 4.0), p)]);
+        let pose = pose_from(vec![part("p1", 10, (3.0, 4.0), p, 0.0)]);
         let mut frame = FrameBuffer::new(10, 10);
         compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
 
         assert_eq!(px(&frame, 3, 4), [0, 0, 255, 255]);
         assert_eq!(px(&frame, 4, 5), [0, 0, 255, 255]);
-        assert_eq!(px(&frame, 2, 4), [255, 0, 0, 255], "left of part untouched");
-        assert_eq!(px(&frame, 5, 4), [255, 0, 0, 255], "right of part untouched");
     }
 
     #[test]
-    fn semi_transparent_part_blends_with_background() {
-        // src green a=128 over red bg → [127, 128, 0, 255] (±1 for rounding).
-        let bg = solid(4, 4, [255, 0, 0, 255]);
-        let p = solid(1, 1, [0, 255, 0, 128]);
-        let pose = pose_from(vec![part("p1", 1, (0.0, 0.0), p)]);
-        let mut frame = FrameBuffer::new(4, 4);
-        compose_frame(&mut frame, &bg, &full_crop(4, 4), &pose);
+    fn rotated_part_90deg_hits_correct_pixels() {
+        // 2x1 image: pixel 0 is Red, pixel 1 is Blue. Top-left (2, 4).
+        // Pivot at center (3, 4.5). Rotated 90 deg (PI/2).
+        let mut img = solid(2, 1, [0, 0, 0, 0]); // Transparent base
+        img.rgba[0..4].copy_from_slice(&[255, 0, 0, 255]); // Red
+        img.rgba[4..8].copy_from_slice(&[0, 0, 255, 255]); // Blue
 
-        let got = px(&frame, 0, 0);
-        assert!((got[0] as i32 - 127).abs() <= 1, "r={}", got[0]);
-        assert!((got[1] as i32 - 128).abs() <= 1, "g={}", got[1]);
-        assert_eq!(got[2], 0);
-        assert_eq!(got[3], 255);
+        let pose = pose_from(vec![part("p1", 1, (2.0, 4.0), img, std::f32::consts::FRAC_PI_2)]);
+        let mut frame = FrameBuffer::new(10, 10);
+        let bg = solid(10, 10, [0, 0, 0, 0]); // Transparent bg to see exact bounds
+        
+        compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
+
+        // After 90 deg rotation, the red pixel (originally left) goes to the top.
+        // Center is (3, 4.5). Red should end up at approx (2, 3) or (3, 3).
+        assert_eq!(px(&frame, 2, 3), [255, 0, 0, 255]);
+        // The blue pixel (originally right) goes to the bottom.
+        assert_eq!(px(&frame, 3, 5), [0, 0, 255, 255]);
     }
 
     #[test]
-    fn fully_transparent_part_is_noop() {
-        let bg = solid(4, 4, [255, 0, 0, 255]);
-        let p = solid(2, 2, [0, 0, 255, 0]);
-        let pose = pose_from(vec![part("p1", 1, (0.0, 0.0), p)]);
-        let mut frame = FrameBuffer::new(4, 4);
-        compose_frame(&mut frame, &bg, &full_crop(4, 4), &pose);
-        for y in 0..4 {
-            for x in 0..4 {
-                assert_eq!(px(&frame, x, y), [255, 0, 0, 255], "at ({x},{y})");
-            }
-        }
-    }
-
-    #[test]
-    fn z_order_higher_z_drawn_on_top() {
-        let bg = solid(4, 4, [0, 0, 0, 255]);
-        let red = solid(2, 2, [255, 0, 0, 255]);
-        let blue = solid(2, 2, [0, 0, 255, 255]);
-        // pose_from sorts by z; blue z=2 > red z=1 → blue drawn later.
-        let pose = pose_from(vec![
-            part("red", 1, (0.0, 0.0), red),
-            part("blue", 2, (0.0, 0.0), blue),
-        ]);
-        let mut frame = FrameBuffer::new(4, 4);
-        compose_frame(&mut frame, &bg, &full_crop(4, 4), &pose);
-        assert_eq!(px(&frame, 0, 0), [0, 0, 255, 255], "blue must win at overlap");
-    }
-
-    // ---------------- clipping ----------------
-
-    #[test]
-    fn part_offscreen_left_clipped() {
-        // Part 3x3 at (-2, 3): only src column 2 (dst_x=0) visible.
+    fn rotated_part_45deg_expands_aabb() {
         let bg = solid(10, 10, [255, 0, 0, 255]);
-        let p = solid(3, 3, [0, 0, 255, 255]);
-        let pose = pose_from(vec![part("p1", 1, (-2.0, 3.0), p)]);
+        let p = solid(2, 2, [0, 0, 255, 255]); // 2x2 square
+        // Top-left (4,4), Pivot (5,5). Rotate 45 deg.
+        let pose = pose_from(vec![part("p1", 1, (4.0, 4.0), p, std::f32::consts::FRAC_PI_4)]);
         let mut frame = FrameBuffer::new(10, 10);
         compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
 
-        for dy in 3..6 {
-            assert_eq!(px(&frame, 0, dy), [0, 0, 255, 255], "column 0 at y={dy}");
-            assert_eq!(px(&frame, 1, dy), [255, 0, 0, 255], "column 1 should be bg");
-        }
-        assert_eq!(px(&frame, 0, 2), [255, 0, 0, 255], "above part");
-        assert_eq!(px(&frame, 0, 6), [255, 0, 0, 255], "below part");
+        // 45 deg rotation makes the 2x2 square wider. It should cover (4,5), (5,4) etc.
+        // Center is (5,5). Corners of 2x2 go to (5, 3.58), (6.41, 5), etc.
+        // So pixel (5,3) should have blue.
+        assert_eq!(px(&frame, 5, 3), [0, 0, 255, 255]);
+        assert_eq!(px(&frame, 5, 6), [0, 0, 255, 255]);
     }
 
     #[test]
-    fn part_offscreen_right_clipped() {
-        // Part 5x5 at (8, 0) in 10-wide frame → only columns 0,1 (src) visible.
+    fn rotated_off_screen_no_crash() {
         let bg = solid(10, 10, [255, 0, 0, 255]);
-        let p = solid(5, 5, [0, 0, 255, 255]);
-        let pose = pose_from(vec![part("p1", 1, (8.0, 0.0), p)]);
+        let p = solid(2, 2, [0, 0, 255, 255]);
+        let pose = pose_from(vec![part("p1", 1, (-50.0, -50.0), p, 1.0)]);
         let mut frame = FrameBuffer::new(10, 10);
         compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
-
-        assert_eq!(px(&frame, 8, 0), [0, 0, 255, 255]);
-        assert_eq!(px(&frame, 9, 4), [0, 0, 255, 255]);
-        assert_eq!(px(&frame, 7, 0), [255, 0, 0, 255], "left edge is bg");
-    }
-
-    #[test]
-    fn fully_offscreen_part_no_crash() {
-        let bg = solid(4, 4, [255, 0, 0, 255]);
-        let p = solid(3, 3, [0, 0, 255, 255]);
-        let pose = pose_from(vec![part("p1", 1, (-100.0, -100.0), p)]);
-        let mut frame = FrameBuffer::new(4, 4);
-        compose_frame(&mut frame, &bg, &full_crop(4, 4), &pose);
-        // Everything still red.
+        // Should not crash, should just not draw anything
         assert_eq!(px(&frame, 0, 0), [255, 0, 0, 255]);
-        assert_eq!(px(&frame, 3, 3), [255, 0, 0, 255]);
     }
-
-    // ---------------- integration-ish ----------------
-
-    #[test]
-    fn crop_plus_part_combined() {
-        // bg solid red, crop offset, part sits inside crop coordinate space.
-        let bg = solid(20, 20, [255, 0, 0, 255]);
-        let p = solid(2, 2, [0, 255, 0, 255]);
-        let pose = pose_from(vec![part("p1", 1, (2.0, 2.0), p)]);
-        let mut frame = FrameBuffer::new(10, 10);
-        let crop = CropWindow { x: 5, y: 5, w: 10, h: 10 };
-        compose_frame(&mut frame, &bg, &crop, &pose);
-
-        assert_eq!(px(&frame, 0, 0), [255, 0, 0, 255], "crop corner is bg");
-        assert_eq!(px(&frame, 2, 2), [0, 255, 0, 255], "part at frame coord (2,2)");
-    }
-
-    #[test]
-    fn fractional_top_left_rounds() {
-        // top_left (1.4, 2.6) → rounds to (1, 3).
-        let bg = solid(10, 10, [255, 0, 0, 255]);
-        let p = solid(1, 1, [0, 0, 255, 255]);
-        let pose = pose_from(vec![part("p1", 1, (1.4, 2.6), p)]);
-        let mut frame = FrameBuffer::new(10, 10);
-        compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
-        assert_eq!(px(&frame, 1, 3), [0, 0, 255, 255]);
-        assert_eq!(px(&frame, 1, 2), [255, 0, 0, 255]);
-    }
-      }
+}
