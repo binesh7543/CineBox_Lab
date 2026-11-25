@@ -1,8 +1,0 @@
-{
-  "skin": "oggy", "base_height": 400,
-  "parts": {
-    "body": { "asset": "oggy/body", "pivot": {"x": 20, "y": 20}, "z": 3 },
-    "p10":  { "asset": "oggy/part_10", "pivot": {"x": 5, "y": 5 }, "z": 4,
-              "parent": "body", "attach": {"x": 10, "y": 10} }
-  }
-}
