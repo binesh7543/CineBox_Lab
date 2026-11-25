@@ -40,26 +40,21 @@ pub struct CropWindow {
 }
 
 /// `camera` + background size + video size -> integer crop window.
-///
-/// - Pan clamped taaki window background ke andar rahe:
-///     `x ∈ [0, bg_w - vid_w]`, same y.
-/// - Fractional pan: nearest pixel (`round`).
-/// - **Background chhota hai video se**: window = poora background at (0,0),
-///   w/h = bg. Compositor zero-padding karega (§12 se bada bg expected tha,
-///   par guard hai).
 pub fn window(cam: &Camera, bg: (u32, u32), vid: (u32, u32)) -> CropWindow {
-    // Background smaller than video — return full bg, no clamping math.
-    if bg.0 <= vid.0 || bg.1 <= vid.1 {
-        return CropWindow { x: 0, y: 0, w: bg.0.min(vid.0), h: bg.1.min(vid.1) };
-    }
-
-    let max_x = (bg.0 - vid.0) as f32;
-    let max_y = (bg.1 - vid.1) as f32;
+    // FIX: Ek axis chhoti hone se dusri axis ka pan nahi rukna chahiye.
+    // Isliye per-axis saturating_sub use kiya hai.
+    let max_x = bg.0.saturating_sub(vid.0) as f32;
+    let max_y = bg.1.saturating_sub(vid.1) as f32;
 
     let x = cam.pan_x.clamp(0.0, max_x).round() as u32;
     let y = cam.pan_y.clamp(0.0, max_y).round() as u32;
 
-    CropWindow { x, y, w: vid.0, h: vid.1 }
+    CropWindow {
+        x,
+        y,
+        w: vid.0.min(bg.0),
+        h: vid.1.min(bg.1),
+    }
 }
 
 // ---------------- Tests ----------------
@@ -94,7 +89,7 @@ mod tests {
 
     #[test]
     fn pan_south_moves_window_down() {
-        let w = window(&Camera { pan_x: 0.0, pan_y: 100.0 }, BG, VID);
+        let w = window(&Camera { pan_x: 0.0, pan_y: 100.0 }, (2160, 1500), VID);
         assert_eq!(w.x, 0);
         assert_eq!(w.y, 100);
     }
@@ -141,23 +136,19 @@ mod tests {
 
     #[test]
     fn partial_small_background_clamps_each_axis_independently() {
-        // bg.w < vid.w lekin bg.h > vid.h — dono axes independent.
+        // FIX: Ab bg.w chhoti hai to X pe pan nahi hoga, par bg.h badi hai to Y pe pan chalega.
         let bg = (400, 2000);
         let w = window(&Camera { pan_x: 100.0, pan_y: 300.0 }, bg, VID);
-        // x-axis: bg<=vid -> x=0, w=400
-        // y-axis: bg>vid -> window moves but our branch returns early.
-        // Ye early-return design ka contract hai: ek bhi axis chhoti ho to
-        // full-bg path chalta hai. Documented, tested.
-        assert_eq!(w, CropWindow { x: 0, y: 0, w: 400, h: 1280 });
+        assert_eq!(w, CropWindow { x: 0, y: 300, w: 400, h: 1280 });
     }
 
     #[test]
     fn pan_result_never_escapes_background() {
         for px in [-1000.0, -1.0, 0.0, 1.0, 100.0, 2000.0] {
             for py in [-1000.0, 0.0, 1000.0] {
-                let w = window(&Camera { pan_x: px, pan_y: py }, BG, VID);
-                assert!(w.x + w.w <= BG.0, "x overflow: {:?}", w);
-                assert!(w.y + w.h <= BG.1, "y overflow: {:?}", w);
+                let w = window(&Camera { pan_x: px, pan_y: py }, (2160, 2000), VID);
+                assert!(w.x + w.w <= 2160, "x overflow: {:?}", w);
+                assert!(w.y + w.h <= 2000, "y overflow: {:?}", w);
             }
         }
     }
@@ -170,4 +161,4 @@ mod tests {
         takes(c);
         takes(c);
     }
-          }
+}
