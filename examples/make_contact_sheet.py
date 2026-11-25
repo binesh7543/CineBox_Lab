@@ -1,7 +1,6 @@
 import os
 from PIL import Image
 
-# 15 frames ko ek 5x3 grid (contact sheet) mein jodne ke liye
 frames_dir = "examples/frames"
 output_path = "examples/contact_sheet.png"
 
@@ -17,12 +16,10 @@ if not frames:
     print("No frames found to make contact sheet.")
     exit(1)
 
-# Maan lo frames 200x200 ke hain
 w, h = frames[0].size
 cols = 5
 rows = 3
 
-# Naya blank image banayo
 sheet = Image.new("RGBA", (w * cols, h * rows))
 
 for i, frame in enumerate(frames):
