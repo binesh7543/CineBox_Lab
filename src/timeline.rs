@@ -41,7 +41,6 @@ impl CharacterState {
 }
 
 /// Character ka state calculate karo us specific time `t` par.
-/// Ye function pure hai — koi side effect nahi, given `t` ke liye same output.
 pub fn get_character_state(
     job: &Job,
     char_id: &str,
@@ -55,34 +54,23 @@ pub fn get_character_state(
         .filter(|ev| ev.char.as_deref() == Some(char_id) && ev.t <= t)
         .collect();
 
-    // Sort by time just in case JSON mein out-of-order hain.
+    // Sort by time
     relevant_events.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut state = CharacterState::initial(initial_pos);
 
-    // 2. Iterate through events and apply them
-    for (i, ev) in relevant_events.iter().enumerate() {
-        let next_event_time = relevant_events
-            .get(i + 1)
-            .map(|e| e.t)
-            .unwrap_or(f32::INFINITY);
-
+    // 2. Sirf sabse latest event (jo abhi active hai) ko process karo
+    if let Some(ev) = relevant_events.last() {
         let action_name = ev.action.as_deref().unwrap_or("idle");
-
-        // Agar event ke baad koi naya event aaya, to hume current action ka duration limit karna hoga.
-        // Warna aakhri event infinity tak chalega.
-        let event_duration = ev.dur.unwrap_or(next_event_time - ev.t);
-        let event_end_time = ev.t + event_duration;
-
+        let event_duration = ev.dur.unwrap_or(1.0);
         let time_in_this_event = (t - ev.t).min(event_duration);
 
         if action_name == "walk" || action_name == "run" {
-            state.action = if action_name == "walk" { ActionState::Walk } else { ActionState::Wave }; // run->wave for now placeholder, run M3
+            state.action = if action_name == "walk" { ActionState::Walk } else { ActionState::Wave };
             if let Some(to) = ev.to {
                 let start_x = state.pos.0;
                 let start_y = state.pos.1;
-                
-                // Linear interpolation
+
                 let progress = if event_duration > 0.0 {
                     (time_in_this_event / event_duration).clamp(0.0, 1.0)
                 } else {
@@ -91,26 +79,18 @@ pub fn get_character_state(
 
                 state.pos.0 = start_x + (to.x - start_x) * progress;
                 state.pos.1 = start_y + (to.y - start_y) * progress;
-                
-                // Walk phase calculate karo (0.0 to 1.0)
+
                 state.walk_phase = (time_in_this_event / WALK_CYCLE_PERIOD_SEC) % 1.0;
             }
         } else if action_name == "wave" {
             state.action = ActionState::Wave;
-            state.walk_phase = 0.0; // Wave mein phase nahi hota
+            state.walk_phase = 0.0;
         } else {
-            // Default to idle
             state.action = ActionState::Idle;
             state.walk_phase = 0.0;
         }
 
         state.action_elapsed = time_in_this_event;
-
-        // Agar time `t` current event ke end se aage hai, to next event loop mein handle hoga.
-        // Agar `t` is event ke andar hai, to loop break kar sakte hain.
-        if t < event_end_time {
-            break;
-        }
     }
 
     state
@@ -154,7 +134,7 @@ mod tests {
                 { "t": 1.0, "char": "c1", "action": "walk", "to": { "x": 200, "y": 100 }, "dur": 2.0 }
             ]"#,
         );
-        
+
         // At t=0: idle, pos=(0,0)
         let s0 = get_character_state(&job, "c1", (0, 0), 0.0);
         assert_eq!(s0.action, ActionState::Idle);
@@ -182,7 +162,7 @@ mod tests {
         // At t=0.25, phase = 0.25
         let s1 = get_character_state(&job, "c1", (0, 0), 0.25);
         assert!((s1.walk_phase - 0.25).abs() < 1e-5);
-        
+
         // At t=1.25, phase = 1.25 % 1.0 = 0.25
         let s2 = get_character_state(&job, "c1", (0, 0), 1.25);
         assert!((s2.walk_phase - 0.25).abs() < 1e-5);
@@ -200,4 +180,4 @@ mod tests {
         let state = get_character_state(&job, "c1", (0, 0), 1.5);
         assert_eq!(state.action, ActionState::Wave);
     }
-          }
+}
