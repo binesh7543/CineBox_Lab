@@ -1,7 +1,5 @@
-use cinebox_lab::types::Job;
-use cinebox_lab::timeline::{get_character_state, ActionState};
-
-// Note: Agar crate ka naam 'cinebox_lab' nahi hai, toh use apne Cargo.toml wale naam se replace kar lena.
+use lkj_engine::types::Job;
+use lkj_engine::timeline::{get_character_state, ActionState};
 
 #[test]
 fn position_held_after_walk() {
@@ -16,15 +14,15 @@ fn position_held_after_walk() {
         { "t": 5.0, "char": "c1", "action": "wave" }
       ]
     }"#;
-    
+
     let job: Job = serde_json::from_str(json).unwrap();
-    
+
     // t = 5.5 par (Wave ke beech mein)
     let state = get_character_state(&job, "c1", (300, 1000), 5.5);
-    
+
     // Action wave hona chahiye
     assert_eq!(state.action, ActionState::Wave);
-    
+
     // Position walk ke end (600, 1000) par ruki honi chahiye, reset hoke (300, 1000) nahi honi chahiye
     assert_eq!(state.pos, (600.0, 1000.0));
 }
@@ -43,11 +41,11 @@ fn position_held_after_face_event() {
         { "t": 5.0, "char": "c1", "face": { "expr": "happy", "look": "right" } }
       ]
     }"#;
-    
+
     let job: Job = serde_json::from_str(json).unwrap();
-    
+
     let state = get_character_state(&job, "c1", (300, 1000), 5.5);
-    
+
     // Position reset nahi honi chahiye
     assert_eq!(state.pos, (600.0, 1000.0));
 }
