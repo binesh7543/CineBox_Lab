@@ -4,10 +4,13 @@
 //!   - Rotation support added (parent chain accumulation).
 //!   - Movement library (idle, walk, wave) keyframes.
 //!   - `ResolvedPart` now has `angle_rad`.
+//!
+//! M3 Fix (Bug 2): Walk cycle ab absolute time ke hisaab se calculate hota hai
+//! taaki legs aur arms opposite phase mein alternate karein.
 
 use crate::assets::CachedImage;
 use crate::timeline::ActionState;
-use crate::types::SkinManifest;
+use crate::types::{SkinManifest, WALK_CYCLE_PERIOD_SEC};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -207,12 +210,13 @@ pub fn resolve_animated_pose(
 }
 
 /// M2 Movement Library: returns local angle in radians.
-fn get_local_angle(part_name: &str, action: ActionState, phase: f32, time: f32) -> f32 {
+fn get_local_angle(part_name: &str, action: ActionState, _phase: f32, time: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     match action {
         ActionState::Idle => 0.0,
         ActionState::Walk => {
-            let cycle = phase * TAU;
+            // Bug 2 Fix: Absolute time se cycle calculate karo taaki period fix rahe
+            let cycle = (time / WALK_CYCLE_PERIOD_SEC) * TAU;
             match part_name {
                 "p3" => cycle.sin() * 0.5,                      // Right leg
                 "p4" => (cycle + PI).sin() * 0.5,               // Left leg
@@ -278,7 +282,7 @@ mod tests {
         images.insert("s".to_string(), img((20, 20), (20, 20)));
 
         // Walk state, phase 0.25 (quarter cycle). p10 is an arm, so it should rotate.
-        let pose = resolve_animated_pose(&m, (300.0, 400.0), &images, ActionState::Walk, 0.25, 0.0).unwrap();
+        let pose = resolve_animated_pose(&m, (300.0, 400.0), &images, ActionState::Walk, 0.25, 0.25).unwrap();
         let p10 = pose.get("p10").unwrap();
         
         assert!(p10.angle_rad != 0.0, "Walk state should rotate arm");
@@ -299,7 +303,8 @@ mod tests {
         let mut images = HashMap::new();
         for a in ["b", "a", "c"] { images.insert(a.to_string(), img((10, 10), (10, 10))); }
 
-        let pose = resolve_animated_pose(&m, (0.0, 0.0), &images, ActionState::Walk, 0.75, 0.0).unwrap();
+        // Using action_time = 0.75 directly
+        let pose = resolve_animated_pose(&m, (0.0, 0.0), &images, ActionState::Walk, 0.75, 0.75).unwrap();
         
         let p10 = pose.get("p10").unwrap();
         let p6 = pose.get("p6").unwrap();
@@ -314,4 +319,35 @@ mod tests {
         assert!(p6.world_pivot.0 > 19.0 && p6.world_pivot.0 < 19.5);
         assert!(p6.world_pivot.1 > 3.5 && p6.world_pivot.1 < 4.0);
     }
-}
+
+    #[test]
+    fn walk_legs_alternate() {
+        let phase = 0.0; 
+        let time1 = 0.25; // Quarter cycle
+        let time2 = 0.75; // Three-quarter cycle
+        
+        let p3_1 = get_local_angle("p3", ActionState::Walk, phase, time1);
+        let p3_2 = get_local_angle("p3", ActionState::Walk, phase, time2);
+        let p4_1 = get_local_angle("p4", ActionState::Walk, phase, time1);
+        let p4_2 = get_local_angle("p4", ActionState::Walk, phase, time2);
+
+        assert!(p3_1 > 0.0, "Right leg should move forward");
+        assert!(p3_2 < 0.0, "Right leg should move backward");
+        assert!(p4_1 < 0.0, "Left leg should move backward");
+        assert!(p4_2 > 0.0, "Left leg should move forward");
+    }
+
+    #[test]
+    fn walk_arms_opposite_legs() {
+        let phase = 0.0;
+        let time1 = 0.25; 
+
+        let p3 = get_local_angle("p3", ActionState::Walk, phase, time1); // Right leg
+        let p10 = get_local_angle("p10", ActionState::Walk, phase, time1); // Right arm
+        let p4 = get_local_angle("p4", ActionState::Walk, phase, time1); // Left leg
+        let p8 = get_local_angle("p8", ActionState::Walk, phase, time1); // Left arm
+
+        assert!(p3 > 0.0 && p10 < 0.0, "Right arm must be opposite to right leg");
+        assert!(p4 < 0.0 && p8 > 0.0, "Left arm must be opposite to left leg");
+    }
+            }
