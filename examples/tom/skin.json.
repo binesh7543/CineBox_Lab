@@ -1,0 +1,30 @@
+{
+  "skin": "tom",
+  "base_height": 400,
+  "parts": {
+    "body": { "asset": "tom/body", "pivot": { "x": 20, "y": 30 }, "z": 3 },
+    
+    "p9":  { "asset": "tom/part_9", "pivot": { "x": 15, "y": 15 }, "z": 4, 
+             "parent": "body", "attach": { "x": 20, "y": 0 } },
+             
+    "p10": { "asset": "tom/part_10", "pivot": { "x": 7.5, "y": 7.5 }, "z": 2, 
+             "parent": "body", "attach": { "x": 35, "y": 10 } },
+    "p6":  { "asset": "tom/part_6", "pivot": { "x": 5, "y": 0 }, "z": 1, 
+             "parent": "p10", "attach": { "x": 7.5, "y": 15 } },
+             
+    "p8":  { "asset": "tom/part_8", "pivot": { "x": 7.5, "y": 7.5 }, "z": 2, 
+             "parent": "body", "attach": { "x": 5, "y": 10 } },
+    "p5":  { "asset": "tom/part_5", "pivot": { "x": 5, "y": 0 }, "z": 1, 
+             "parent": "p8", "attach": { "x": 7.5, "y": 15 } },
+             
+    "p3":  { "asset": "tom/part_3", "pivot": { "x": 6, "y": 0 }, "z": 1, 
+             "parent": "body", "attach": { "x": 30, "y": 60 } },
+    "p4":  { "asset": "tom/part_4", "pivot": { "x": 6, "y": 0 }, "z": 1, 
+             "parent": "body", "attach": { "x": 10, "y": 60 } },
+
+    "face_eyes":  { "asset": "FACE_EYES", "pivot": { "x": 5, "y": 5 }, "z": 5, 
+                    "parent": "p9", "attach": { "x": 15, "y": 10 } },
+    "face_mouth": { "asset": "FACE_MOUTH", "pivot": { "x": 5, "y": 5 }, "z": 6, 
+                    "parent": "p9", "attach": { "x": 15, "y": 20 } }
+  }
+}
