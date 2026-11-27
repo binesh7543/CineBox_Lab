@@ -20,6 +20,11 @@
     "p3":  { "asset": "oggy/part_3", "pivot": { "x": 6, "y": 0 }, "z": 1, 
              "parent": "body", "attach": { "x": 30, "y": 60 } },
     "p4":  { "asset": "oggy/part_4", "pivot": { "x": 6, "y": 0 }, "z": 1, 
-             "parent": "body", "attach": { "x": 10, "y": 60 } }
+             "parent": "body", "attach": { "x": 10, "y": 60 } },
+
+    "face_eyes":  { "asset": "FACE_EYES", "pivot": { "x": 5, "y": 5 }, "z": 5, 
+                    "parent": "p9", "attach": { "x": 15, "y": 10 } },
+    "face_mouth": { "asset": "FACE_MOUTH", "pivot": { "x": 5, "y": 5 }, "z": 6, 
+                    "parent": "p9", "attach": { "x": 15, "y": 20 } }
   }
 }
