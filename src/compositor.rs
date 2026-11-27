@@ -331,16 +331,16 @@ mod tests {
         let bg = solid(20, 20, [255, 0, 0, 255]);
         let p = solid(2, 2, [0, 0, 255, 255]);
         
-        // Part is at world position (10, 5)
-        let pose = pose_from(vec![part("p1", 1, (10.0, 5.0), p, 0.0)]);
+        // Part is at world position (10, 8) - Fixed Y to stay inside 10x10 frame
+        let pose = pose_from(vec![part("p1", 1, (10.0, 8.0), p, 0.0)]);
         let mut frame = FrameBuffer::new(10, 10);
         
         // Camera pan x=5, y=0
         let crop = CropWindow { x: 5, y: 0, w: 10, h: 10 };
         compose_frame(&mut frame, &bg, &crop, &pose);
 
-        // Original part at 10,5 should now be at 10 - 5 = 5, 5 on screen
-        assert_eq!(px(&frame, 5, 5), [0, 0, 255, 255]);
-        assert_eq!(px(&frame, 4, 5), [255, 0, 0, 255]); // Outside part
+        // Original part at 10,8 should now be at 10 - 5 = 5, 8 on screen
+        assert_eq!(px(&frame, 5, 8), [0, 0, 255, 255]);
+        assert_eq!(px(&frame, 4, 8), [255, 0, 0, 255]); // Outside part
     }
 }
