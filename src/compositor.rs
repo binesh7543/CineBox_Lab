@@ -4,6 +4,10 @@
 //!   - Rotation support (Nearest Neighbor sampling).
 //!   - AABB (Bounding Box) optimization: only rotated bounding box is processed.
 //!   - `blit_part` takes `ResolvedPart` directly to access angle and world_pivot.
+//!
+//! M3 Camera Fix:
+//!   - Background ke saath-saath characters (parts) bhi `CropWindow` ke hisaab se shift honge,
+//!     taaki camera pan/tilt karne par poori screen ek saath move kare.
 
 use crate::assets::CachedImage;
 use crate::camera::CropWindow;
@@ -40,7 +44,7 @@ pub fn compose_frame(
     fill_opaque_black(frame);
     blit_background_crop(frame, background, crop);
     for part in &pose.parts {
-        blit_part(frame, part);
+        blit_part(frame, part, crop);
     }
 }
 
@@ -78,12 +82,19 @@ fn blit_background_crop(frame: &mut FrameBuffer, bg: &CachedImage, crop: &CropWi
     }
 }
 
-fn blit_part(frame: &mut FrameBuffer, part: &ResolvedPart) {
+fn blit_part(frame: &mut FrameBuffer, part: &ResolvedPart, crop: &CropWindow) {
+    // Camera offset nikaalo (taaki character background ke saath move kare)
+    let offset_x = crop.x as f32;
+    let offset_y = crop.y as f32;
+
+    let screen_top_left = (part.top_left.0 - offset_x, part.top_left.1 - offset_y);
+    let screen_world_pivot = (part.world_pivot.0 - offset_x, part.world_pivot.1 - offset_y);
+
     // Fast path: if angle is effectively zero, use direct memory copy (M1 logic).
     if part.angle_rad.abs() < 1e-5 {
-        blit_part_unrotated(frame, part.top_left, &part.image);
+        blit_part_unrotated(frame, screen_top_left, &part.image);
     } else {
-        blit_part_rotated(frame, part);
+        blit_part_rotated(frame, screen_top_left, screen_world_pivot, part.angle_rad, &part.image);
     }
 }
 
@@ -120,13 +131,18 @@ fn blit_part_unrotated(frame: &mut FrameBuffer, top_left: (f32, f32), img: &Cach
     }
 }
 
-fn blit_part_rotated(frame: &mut FrameBuffer, part: &ResolvedPart) {
-    let img = &part.image;
+fn blit_part_rotated(
+    frame: &mut FrameBuffer,
+    top_left: (f32, f32),
+    world_pivot: (f32, f32),
+    angle_rad: f32,
+    img: &CachedImage,
+) {
     let w = img.width as f32;
     let h = img.height as f32;
-    let (px, py) = part.world_pivot;
-    let (tx, ty) = part.top_left;
-    let angle = part.angle_rad;
+    let (px, py) = world_pivot;
+    let (tx, ty) = top_left;
+    let angle = angle_rad;
 
     let cos_a = angle.cos();
     let sin_a = angle.sin();
@@ -308,5 +324,23 @@ mod tests {
         compose_frame(&mut frame, &bg, &full_crop(10, 10), &pose);
         // Should not crash, should just not draw anything
         assert_eq!(px(&frame, 0, 0), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn camera_pan_shifts_parts_with_background() {
+        let bg = solid(20, 20, [255, 0, 0, 255]);
+        let p = solid(2, 2, [0, 0, 255, 255]);
+        
+        // Part is at world position (10, 8) - Fixed Y to stay inside 10x10 frame
+        let pose = pose_from(vec![part("p1", 1, (10.0, 8.0), p, 0.0)]);
+        let mut frame = FrameBuffer::new(10, 10);
+        
+        // Camera pan x=5, y=0
+        let crop = CropWindow { x: 5, y: 0, w: 10, h: 10 };
+        compose_frame(&mut frame, &bg, &crop, &pose);
+
+        // Original part at 10,8 should now be at 10 - 5 = 5, 8 on screen
+        assert_eq!(px(&frame, 5, 8), [0, 0, 255, 255]);
+        assert_eq!(px(&frame, 4, 8), [255, 0, 0, 255]); // Outside part
     }
 }

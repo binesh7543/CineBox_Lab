@@ -5,8 +5,8 @@
 //!   - Interpolates `x, y` position over time for walk/run.
 //!   - Interpolates walk cycle phase (0.0 to 1.0) for leg/arm angles.
 //!
-//! `main.rs` isko call karega har frame ke liye, aur is file ka koi I/O nahi hai.
-//! Face aur camera events M2 mein ignore honge (M3 ke liye).
+//! M3 Fix (Bug 1): Forward fold implement kiya gaya hai taaki position 
+//! events ke beech mein hold rahe, reset na ho.
 
 use crate::types::{Job, Point, TimelineEvent, WALK_CYCLE_PERIOD_SEC};
 
@@ -59,7 +59,28 @@ pub fn get_character_state(
 
     let mut state = CharacterState::initial(initial_pos);
 
-    // 2. Sirf sabse latest event (jo abhi active hai) ko process karo
+    // 2. Forward fold: Position ko events ke through accumulate karo (Bug 1 Fix)
+    for ev in &relevant_events {
+        if let Some(to) = ev.to {
+            let event_duration = ev.dur.unwrap_or(1.0);
+            
+            if t >= ev.t + event_duration {
+                // Event poora khatam ho chuka hai, position destination pe lock karo
+                state.pos = (to.x, to.y);
+            } else {
+                // Event abhi chal raha hai, interpolate karo current pos se target pos tak
+                let progress = if event_duration > 0.0 {
+                    ((t - ev.t) / event_duration).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                state.pos.0 = state.pos.0 + (to.x - state.pos.0) * progress;
+                state.pos.1 = state.pos.1 + (to.y - state.pos.1) * progress;
+            }
+        }
+    }
+
+    // 3. Action state sirf latest event se decide hoga
     if let Some(ev) = relevant_events.last() {
         let action_name = ev.action.as_deref().unwrap_or("idle");
         let event_duration = ev.dur.unwrap_or(1.0);
@@ -67,21 +88,7 @@ pub fn get_character_state(
 
         if action_name == "walk" || action_name == "run" {
             state.action = if action_name == "walk" { ActionState::Walk } else { ActionState::Wave };
-            if let Some(to) = ev.to {
-                let start_x = state.pos.0;
-                let start_y = state.pos.1;
-
-                let progress = if event_duration > 0.0 {
-                    (time_in_this_event / event_duration).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-
-                state.pos.0 = start_x + (to.x - start_x) * progress;
-                state.pos.1 = start_y + (to.y - start_y) * progress;
-
-                state.walk_phase = (time_in_this_event / WALK_CYCLE_PERIOD_SEC) % 1.0;
-            }
+            state.walk_phase = (time_in_this_event / WALK_CYCLE_PERIOD_SEC) % 1.0;
         } else if action_name == "wave" {
             state.action = ActionState::Wave;
             state.walk_phase = 0.0;
