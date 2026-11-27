@@ -3,12 +3,9 @@
 //! Usage:
 //!     lkj-engine <job.json> <out_dir> [assets_root]
 //!
-//! M2 scope:
-//!   - Loops over time `t` from 0 to duration (default 1.0s for testing).
-//!   - Calls `timeline::get_character_state` to get action, pos, phase.
-//!   - Calls `skeleton::resolve_animated_pose` to get rotated parts.
-//!   - Saves each frame as PNG in `<out_dir>`.
-//!   - Face and Camera events are ignored (M3).
+//! M3 Update:
+//!   - Camera pan/tilt timeline events resolve kiye gaye hain.
+//!   - Har frame par camera ki position calculate hoti hai aur `compositor` ko di jati hai.
 
 mod assets;
 mod camera;
@@ -75,7 +72,7 @@ fn render_job_frames(
 ) -> Result<(), String> {
     let (vid_w, vid_h) = effective_video(job, cfg);
     let fps = job.video.fps.unwrap_or(cfg.fps);
-    let duration = job.video.duration_sec.unwrap_or(1.0); // Default to 1 sec for M2 testing
+    let duration = job.video.duration_sec.unwrap_or(1.0);
     let total_frames = (duration * fps as f32).ceil() as u32;
 
     let mut loader = AssetLoader::new(assets_root.to_path_buf(), cfg.asset_cache_bytes);
@@ -84,7 +81,6 @@ fn render_job_frames(
         .load(&job.background.asset, 1.0)
         .map_err(|e| format!("background '{}': {e}", job.background.asset))?;
 
-    let crop = camera::window(&Camera::STATIC, (bg.width, bg.height), (vid_w, vid_h));
     let mut frame = FrameBuffer::new(vid_w, vid_h);
 
     // Cache manifests and images per skin to avoid reloading per frame
@@ -103,6 +99,11 @@ fn render_job_frames(
 
     for frame_idx in 0..total_frames {
         let t = frame_idx as f32 / fps as f32;
+        
+        // M3: Camera state resolve karo frame `t` ke liye
+        let cam = resolve_camera(job, t);
+        let crop = camera::window(&cam, (bg.width, bg.height), (vid_w, vid_h));
+
         let mut poses: Vec<ResolvedPose> = Vec::with_capacity(job.characters.len());
 
         for ch in &job.characters {
@@ -181,6 +182,31 @@ fn save_png(frame: &FrameBuffer, path: &Path) -> Result<(), String> {
         .map_err(|e| format!("png write {}: {e}", path.display()))
 }
 
+// M3: Camera events (E, W, N, S) resolve karne ka logic
+fn resolve_camera(job: &Job, t: f32) -> Camera {
+    let mut pan_x = 0.0;
+    let mut pan_y = 0.0;
+
+    for ev in &job.timeline {
+        if let Some(cam_ev) = &ev.camera {
+            if t > ev.t {
+                let dur = cam_ev.dur.max(0.001);
+                let progress = ((t - ev.t) / dur).clamp(0.0, 1.0);
+                let dist = cam_ev.amount * progress;
+                
+                match cam_ev.move_dir.as_str() {
+                    "E" => pan_x += dist,
+                    "W" => pan_x -= dist,
+                    "S" => pan_y += dist,
+                    "N" => pan_y -= dist,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Camera { pan_x, pan_y }
+}
+
 // ---------------- Unit tests ----------------
 
 #[cfg(test)]
@@ -244,4 +270,35 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(effective_video(&job, &cfg), (1080, 1920));
     }
-}
+
+    #[test]
+    fn camera_pan_and_tilt_resolve() {
+        let mut job = dummy_job();
+        job.timeline.push(types::TimelineEvent {
+            t: 0.0,
+            char: None,
+            action: None,
+            to: None,
+            dur: None,
+            face: None,
+            camera: Some(types::CameraEvent { move_dir: "E".to_string(), amount: 100.0, dur: 2.0 }),
+        });
+        job.timeline.push(types::TimelineEvent {
+            t: 0.0,
+            char: None,
+            action: None,
+            to: None,
+            dur: None,
+            face: None,
+            camera: Some(types::CameraEvent { move_dir: "S".to_string(), amount: 50.0, dur: 1.0 }),
+        });
+
+        let cam1 = resolve_camera(&job, 1.0); // Mid-pan
+        assert_eq!(cam1.pan_x, 50.0); // 100 * (1/2)
+        assert_eq!(cam1.pan_y, 50.0); // 50 * (1/1)
+
+        let cam2 = resolve_camera(&job, 3.0); // End-pan
+        assert_eq!(cam2.pan_x, 100.0);
+        assert_eq!(cam2.pan_y, 50.0);
+    }
+                  }
