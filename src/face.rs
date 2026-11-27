@@ -3,18 +3,16 @@
 //! §8: "Face (alag layer, head ke upar): aankhein … aur mooh …"
 //! §9: naam pattern — `skin/face_eyes_happy`, `skin/face_mouth_open`.
 //!
-//! **M1 interpretation (documented, M2 mein badal sakta):**
-//!   - Eyes asset    = `{skin}/face_eyes_{expr}`              (ek per expr)
-//!   - Mouth asset   = `{skin}/face_mouth_{mouth_state(expr)}` (happy->open, …)
-//!   - `look`        = carried through, lekin **asset name mein nahi ghusata**
-//!                     M1 mein. M2 mein direction-aware eye variants
-//!                     (`face_eyes_{expr}_{look}`) yahi function return karega —
-//!                     signature nahi badlega.
-//!   - Default state = { expr: "happy", look: "center" } — §9 examples se.
+//! **M3 Implementation:**
+//!   - Eyes asset    = `{skin}/face_eyes_{expr}`
+//!   - Mouth asset   = `{skin}/face_mouth_{mouth_state(expr)}`
+//!   - `look`        = carried through (M3 mein direction-aware eye variants future scope hain).
+//!   - Default state = { expr: "happy", look: "center" }
 //!
-//! **M1 scope:** ye file sirf **naam** deti hai. Position skin.json ke rig se
-//! aati hai (`face_eyes` / `face_mouth` keys ke saath, parent = head). Assets
-//! load karna / place karna caller (main.rs) ka kaam.
+//! **M3 scope:** ye file timeline se face state resolve karti hai aur asset names deti hai. 
+//! Position skin.json ke rig se aati hai (`face_eyes` / `face_mouth` keys ke saath, parent = head).
+
+use crate::types::Job;
 
 pub const DEFAULT_EXPR: &str = "happy";
 pub const DEFAULT_LOOK: &str = "center";
@@ -46,6 +44,22 @@ pub struct FaceAssets {
     pub mouth: String,
 }
 
+/// M3: Timeline se us character ka current face state nikaalo.
+pub fn resolve_face_state(job: &Job, char_id: &str, t: f32) -> FaceState {
+    let mut state = FaceState::default();
+    for ev in &job.timeline {
+        if ev.char.as_deref() == Some(char_id) && ev.t <= t {
+            if let Some(face_ev) = &ev.face {
+                state.expr = face_ev.expr.clone();
+                if let Some(look) = &face_ev.look {
+                    state.look = look.clone();
+                }
+            }
+        }
+    }
+    state
+}
+
 /// Full face resolution: skin name + state -> asset names.
 pub fn resolve_face(skin: &str, state: &FaceState) -> FaceAssets {
     FaceAssets {
@@ -54,7 +68,7 @@ pub fn resolve_face(skin: &str, state: &FaceState) -> FaceAssets {
     }
 }
 
-/// `{skin}/face_eyes_{expr}` — M1 mein `look` include nahi hota.
+/// `{skin}/face_eyes_{expr}` — M3 mein `look` include nahi hota.
 pub fn eyes_asset(skin: &str, expr: &str) -> String {
     format!("{skin}/face_eyes_{expr}")
 }
@@ -65,7 +79,7 @@ pub fn mouth_asset(skin: &str, expr: &str) -> String {
 }
 
 /// §8 kehta hai "mooh se expression badlega" — exprs ko mouth states mein map
-/// karta hai. Naye expr tabhi jodo jab doc mein aaye (M2 planning).
+/// karta hai. Naye expr tabhi jodo jab doc mein aaye.
 pub fn mouth_state_for(expr: &str) -> &'static str {
     match expr {
         "happy" | "surprised" | "excited" => "open",
@@ -89,7 +103,6 @@ mod tests {
 
     #[test]
     fn default_assets_match_section_9_examples() {
-        // §9 ne literally likha: "skin/face_eyes_happy", "skin/face_mouth_open".
         let a = resolve_face("oggy", &FaceState::default());
         assert_eq!(a.eyes, "oggy/face_eyes_happy");
         assert_eq!(a.mouth, "oggy/face_mouth_open");
@@ -116,16 +129,11 @@ mod tests {
         let s = FaceState::new("confused", "center");
         let a = resolve_face("oggy", &s);
         assert_eq!(a.mouth, "oggy/face_mouth_neutral");
-        // Eyes still use expr as-is — asset missing ho to caller (assets.rs)
-        // ka NotFound aayega, jo correct behaviour hai (skin author ki galti).
         assert_eq!(a.eyes, "oggy/face_eyes_confused");
     }
 
     #[test]
-    fn look_does_not_affect_asset_names_in_m1() {
-        // M1 contract: look carried through but not applied.
-        // M2 jab `face_eyes_{expr}_{look}` add karega, ye test todna padega
-        // — that's the point: interface change visible rahe.
+    fn look_does_not_affect_asset_names_in_m3() {
         let a = resolve_face("oggy", &FaceState::new("happy", "right"));
         let b = resolve_face("oggy", &FaceState::new("happy", "left"));
         assert_eq!(a, b);
@@ -133,7 +141,6 @@ mod tests {
 
     #[test]
     fn mouth_state_mapping_pinned() {
-        // Explicit table so M2 changes are conscious.
         let cases = [
             ("happy", "open"),
             ("surprised", "open"),
@@ -162,4 +169,4 @@ mod tests {
         assert_eq!(mouth_asset("s", "sad"), "s/face_mouth_closed");
         assert_eq!(mouth_asset("s", "?"), "s/face_mouth_neutral");
     }
-          }
+}
