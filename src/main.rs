@@ -1,11 +1,8 @@
 //! M2 CLI: JSON -> multiple PNG frames.
 //!
-//! Usage:
-//!     lkj-engine <job.json> <out_dir> [assets_root]
-//!
 //! M3 Update:
-//!   - Camera pan/tilt timeline events resolve kiye gaye hain.
-//!   - Har frame par camera ki position calculate hoti hai aur `compositor` ko di jati hai.
+//!   - Camera pan/tilt integrate ho gaya.
+//!   - Face (aankh/mooh) timeline se resolve hoke dynamically load ho raha hai.
 
 mod assets;
 mod camera;
@@ -56,12 +53,19 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-// ---------------- Steps ----------------
-
 fn load_job(path: &Path) -> Result<Job, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("open job {}: {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("open job {}: {e}", path.display()))?;
     parse_job(file).map_err(|e| format!("job json {}: {e}", path.display()))
+}
+
+fn dummy_image() -> Arc<CachedImage> {
+    Arc::new(CachedImage {
+        rgba: vec![0, 0, 0, 0],
+        width: 1,
+        height: 1,
+        src_width: 1,
+        src_height: 1,
+    })
 }
 
 fn render_job_frames(
@@ -76,14 +80,9 @@ fn render_job_frames(
     let total_frames = (duration * fps as f32).ceil() as u32;
 
     let mut loader = AssetLoader::new(assets_root.to_path_buf(), cfg.asset_cache_bytes);
-
-    let bg = loader
-        .load(&job.background.asset, 1.0)
-        .map_err(|e| format!("background '{}': {e}", job.background.asset))?;
+    let bg = loader.load(&job.background.asset, 1.0).map_err(|e| format!("background '{}': {e}", job.background.asset))?;
 
     let mut frame = FrameBuffer::new(vid_w, vid_h);
-
-    // Cache manifests and images per skin to avoid reloading per frame
     let mut manifest_cache: HashMap<String, SkinManifest> = HashMap::new();
     let mut image_cache: HashMap<String, HashMap<String, Arc<CachedImage>>> = HashMap::new();
 
@@ -100,24 +99,35 @@ fn render_job_frames(
     for frame_idx in 0..total_frames {
         let t = frame_idx as f32 / fps as f32;
         
-        // M3: Camera state resolve karo frame `t` ke liye
         let cam = resolve_camera(job, t);
         let crop = camera::window(&cam, (bg.width, bg.height), (vid_w, vid_h));
-
         let mut poses: Vec<ResolvedPose> = Vec::with_capacity(job.characters.len());
 
         for ch in &job.characters {
             let manifest = &manifest_cache[&ch.skin];
             let images = &image_cache[&ch.id];
 
-            // 1. Get interpolated state from timeline
             let state = timeline::get_character_state(job, &ch.id, (ch.x, ch.y), t);
+            
+            // M3: Face State resolve karo
+            let face_state = face::resolve_face_state(job, &ch.id, t);
+            let face_assets = face::resolve_face(&ch.skin, &face_state);
+            
+            // Clone image map aur face images dynamically inject karo
+            let mut current_images = images.clone();
+            if manifest.parts.contains_key("face_eyes") {
+                let img = loader.load(&face_assets.eyes, ch.height).unwrap_or_else(|_| dummy_image());
+                current_images.insert("FACE_EYES".to_string(), img);
+            }
+            if manifest.parts.contains_key("face_mouth") {
+                let img = loader.load(&face_assets.mouth, ch.height).unwrap_or_else(|_| dummy_image());
+                current_images.insert("FACE_MOUTH".to_string(), img);
+            }
 
-            // 2. Resolve pose with action/rotation
             let pose = resolve_animated_pose(
                 manifest,
                 state.pos,
-                images,
+                &current_images,
                 state.action,
                 state.walk_phase,
                 state.action_elapsed,
@@ -129,7 +139,6 @@ fn render_job_frames(
 
         let merged = merge_poses(poses);
         compose_frame(&mut frame, &bg, &crop, &merged);
-
         let out_path = out_dir.join(format!("frame_{:03}.png", frame_idx));
         save_png(&frame, &out_path)?;
     }
@@ -139,8 +148,7 @@ fn render_job_frames(
 
 fn load_skin_manifest(assets_root: &Path, skin: &str) -> Result<SkinManifest, String> {
     let path = assets_root.join(skin).join("skin.json");
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("open skin '{}': {e}", path.display()))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("open skin '{}': {e}", path.display()))?;
     parse_skin(file).map_err(|e| format!("skin json {}: {e}", path.display()))
 }
 
@@ -151,10 +159,9 @@ fn load_character_images(
 ) -> Result<HashMap<String, Arc<CachedImage>>, String> {
     let mut out: HashMap<String, Arc<CachedImage>> = HashMap::new();
     for part in manifest.parts.values() {
+        if part.asset == "FACE_EYES" || part.asset == "FACE_MOUTH" { continue; }
         if !out.contains_key(&part.asset) {
-            let img = loader
-                .load(&part.asset, ch.height)
-                .map_err(|e| format!("char '{}' asset '{}': {e}", ch.id, part.asset))?;
+            let img = loader.load(&part.asset, ch.height).map_err(|e| format!("char '{}' asset '{}': {e}", ch.id, part.asset))?;
             out.insert(part.asset.clone(), img);
         }
     }
@@ -163,30 +170,22 @@ fn load_character_images(
 
 fn merge_poses(poses: Vec<ResolvedPose>) -> ResolvedPose {
     let mut parts: Vec<ResolvedPart> = poses.into_iter().flat_map(|p| p.parts).collect();
-    // Stable sort ensures character order is preserved on z-tie
     parts.sort_by_key(|p| p.z);
     ResolvedPose { parts }
 }
 
 fn effective_video(job: &Job, cfg: &Config) -> (u32, u32) {
-    (
-        job.video.w.unwrap_or(cfg.video_width),
-        job.video.h.unwrap_or(cfg.video_height),
-    )
+    (job.video.w.unwrap_or(cfg.video_width), job.video.h.unwrap_or(cfg.video_height))
 }
 
 fn save_png(frame: &FrameBuffer, path: &Path) -> Result<(), String> {
-    let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
-        .ok_or_else(|| "internal: frame buffer size mismatch".to_string())?;
-    img.save(path)
-        .map_err(|e| format!("png write {}: {e}", path.display()))
+    let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone()).ok_or_else(|| "internal: frame buffer size mismatch".to_string())?;
+    img.save(path).map_err(|e| format!("png write {}: {e}", path.display()))
 }
 
-// M3: Camera events (E, W, N, S) resolve karne ka logic
 fn resolve_camera(job: &Job, t: f32) -> Camera {
     let mut pan_x = 0.0;
     let mut pan_y = 0.0;
-
     for ev in &job.timeline {
         if let Some(cam_ev) = &ev.camera {
             if t > ev.t {
@@ -207,8 +206,6 @@ fn resolve_camera(job: &Job, t: f32) -> Camera {
     Camera { pan_x, pan_y }
 }
 
-// ---------------- Unit tests ----------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,13 +214,7 @@ mod tests {
         ResolvedPart {
             name: name.to_string(),
             z,
-            image: Arc::new(CachedImage {
-                rgba: vec![],
-                width: 0,
-                height: 0,
-                src_width: 0,
-                src_height: 0,
-            }),
+            image: Arc::new(CachedImage { rgba: vec![], width: 0, height: 0, src_width: 0, src_height: 0 }),
             top_left: (0.0, 0.0),
             world_pivot: (0.0, 0.0),
             angle_rad: 0.0,
@@ -234,11 +225,7 @@ mod tests {
         Job {
             job_id: "t".to_string(),
             video: types::VideoOpts::default(),
-            background: types::Background {
-                asset: "bg".to_string(),
-                w: 100,
-                h: 100,
-            },
+            background: types::Background { asset: "bg".to_string(), w: 100, h: 100 },
             characters: vec![],
             timeline: vec![],
         }
@@ -275,30 +262,20 @@ mod tests {
     fn camera_pan_and_tilt_resolve() {
         let mut job = dummy_job();
         job.timeline.push(types::TimelineEvent {
-            t: 0.0,
-            char: None,
-            action: None,
-            to: None,
-            dur: None,
-            face: None,
+            t: 0.0, char: None, action: None, to: None, dur: None, face: None,
             camera: Some(types::CameraEvent { move_dir: "E".to_string(), amount: 100.0, dur: 2.0 }),
         });
         job.timeline.push(types::TimelineEvent {
-            t: 0.0,
-            char: None,
-            action: None,
-            to: None,
-            dur: None,
-            face: None,
+            t: 0.0, char: None, action: None, to: None, dur: None, face: None,
             camera: Some(types::CameraEvent { move_dir: "S".to_string(), amount: 50.0, dur: 1.0 }),
         });
 
         let cam1 = resolve_camera(&job, 1.0); // Mid-pan
-        assert_eq!(cam1.pan_x, 50.0); // 100 * (1/2)
-        assert_eq!(cam1.pan_y, 50.0); // 50 * (1/1)
+        assert_eq!(cam1.pan_x, 50.0); 
+        assert_eq!(cam1.pan_y, 50.0); 
 
         let cam2 = resolve_camera(&job, 3.0); // End-pan
         assert_eq!(cam2.pan_x, 100.0);
         assert_eq!(cam2.pan_y, 50.0);
     }
-                  }
+}
