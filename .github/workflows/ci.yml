@@ -1,10 +1,11 @@
-name: M2 Build and Test
+name: Build and Test
 
 on:
   push:
-    branches: [ "**" ] # Ab ye saari branches par chalega
+    branches: [ "**" ]
   pull_request:
-    branches: [ "m2-actions", "main" ]
+    branches: [ "main" ]
+  workflow_dispatch: # Actions tab se "Run workflow" dabao -> Docker build bhi chalega
 
 jobs:
   test-and-build:
@@ -23,6 +24,12 @@ jobs:
     - name: Install Pillow (for contact sheet)
       run: pip install pillow
 
+    # FFmpeg pehle, taaki encoder aur piece_sink ke tests sach mein chalein (skip na hon).
+    - name: Install FFmpeg and jq (test machine only)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends ffmpeg jq
+
     - name: Run tests
       run: cargo test --all-targets
 
@@ -35,7 +42,7 @@ jobs:
     - name: Generate Example Assets (Dummy Parts)
       run: python3 examples/generate_assets.py
 
-    - name: Run Render Engine on Example (M2)
+    - name: Run Render Engine on Example (PNG frames)
       run: ./target/release/lkj-engine examples/job.json examples/frames examples/
 
     - name: Create Contact Sheet
@@ -52,3 +59,101 @@ jobs:
       with:
         name: m2-rendered-frames
         path: examples/frames/
+
+    # ---------- M4: video ----------
+    - name: Run Render Engine in video mode (M4)
+      run: |
+        set -euo pipefail
+        ./target/release/lkj-engine examples/job.json examples/video examples/ --video
+        ls -l examples/video
+        test -s examples/video/piece_000.mp4
+        ffmpeg -v error -i examples/video/piece_000.mp4 -f null -
+
+    - name: Upload MP4 pieces Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: m4-video-pieces
+        path: examples/video/
+
+    # ---------- M5.0.1: API ----------
+    # Nakli Telegram token ke saath: delivery fail honi chahiye (job "failed"),
+    # aur token status ya log mein kahin nahi dikhna chahiye.
+    - name: API smoke test (key, queue, status, token never leaks)
+      run: |
+        set -euo pipefail
+        export ENGINE_KEY=ci-test-key
+        export TELEGRAM_BOT_TOKEN=123456:CI-FAKE-TOKEN
+        export TELEGRAM_CHAT_ID=-100123456
+        export PORT=18080
+        ./target/release/lkj-engine --serve examples/ /tmp/lkj_jobs > server.log 2>&1 &
+        SERVER_PID=$!
+        trap 'kill $SERVER_PID 2>/dev/null || true; echo "--- server.log ---"; cat server.log' EXIT
+
+        for i in $(seq 1 20); do
+          if curl -fsS http://127.0.0.1:18080/health > /dev/null; then break; fi
+          sleep 1
+        done
+        curl -fsS http://127.0.0.1:18080/health | grep -q '"ok":true'
+
+        # bina key ke reject
+        CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary @examples/job.json http://127.0.0.1:18080/render)
+        test "$CODE" = "401"
+
+        # key ke saath queue ho
+        JOB_ID=$(python3 -c "import json; print(json.load(open('examples/job.json'))['job_id'])")
+        curl -fsS -X POST -H "X-Engine-Key: ci-test-key" --data-binary @examples/job.json http://127.0.0.1:18080/render | grep -q '"status":"queued"'
+
+        # status poll: nakli token se delivery fail hogi
+        STATUS=""
+        RESP=""
+        for i in $(seq 1 60); do
+          RESP=$(curl -fsS -H "X-Engine-Key: ci-test-key" "http://127.0.0.1:18080/status/$JOB_ID")
+          STATUS=$(echo "$RESP" | jq -r .status)
+          echo "status: $RESP"
+          if [ "$STATUS" = "failed" ] || [ "$STATUS" = "done" ]; then break; fi
+          sleep 2
+        done
+        test "$STATUS" = "failed"
+        echo "$RESP" | jq -r .error | grep -qi telegram
+
+        if echo "$RESP" | grep -q "CI-FAKE-TOKEN"; then echo "token leaked in status"; exit 1; fi
+        if grep -q "CI-FAKE-TOKEN" server.log; then echo "token leaked in server.log"; exit 1; fi
+
+  # Sirf manual: Actions tab -> Run workflow. Push pe nahi chalta (build lamba hai).
+  docker-build:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Build Docker image
+      run: |
+        docker build -t lkj-engine .
+        docker images lkj-engine
+
+    - name: Check engine + ffmpeg size (limit 50 MB)
+      run: |
+        set -euo pipefail
+        docker run --rm --entrypoint sh lkj-engine -c 'stat -c "%n %s" /usr/local/bin/lkj-engine /usr/local/bin/ffmpeg' | tee sizes.txt
+        TOTAL=$(awk '{s+=$2} END {print s}' sizes.txt)
+        echo "total bytes: $TOTAL"
+        test "$TOTAL" -lt 52428800
+
+    - name: Container starts and /health answers
+      run: |
+        set -euo pipefail
+        docker run -d --name lkj -p 18081:10000 \
+          -e PORT=10000 -e ENGINE_KEY=ci-test-key \
+          -e TELEGRAM_BOT_TOKEN=123456:CI-FAKE-TOKEN -e TELEGRAM_CHAT_ID=-100123456 \
+          lkj-engine
+        for i in $(seq 1 20); do
+          if curl -fsS http://127.0.0.1:18081/health > /dev/null; then break; fi
+          sleep 1
+        done
+        curl -fsS http://127.0.0.1:18081/health | grep -q '"ok":true'
+
+    - name: Container logs
+      if: always()
+      run: docker logs lkj || true
