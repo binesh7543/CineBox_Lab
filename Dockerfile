@@ -38,7 +38,6 @@ RUN curl -fsSL https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz -o /tmp/ffmpeg.ta
         --enable-encoder=libx264 \
         --enable-decoder=rawvideo --enable-demuxer=rawvideo \
         --enable-muxer=mp4 \
-        --enable-parser=h264 \
         --enable-protocol=pipe --enable-protocol=file \
         --enable-filter=scale --enable-filter=format --enable-filter=null \
         --enable-filter=buffer --enable-filter=buffersink \
