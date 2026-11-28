@@ -6,10 +6,26 @@
 //!
 //! Hard-limits (HARD_MAX_*) ko kabhi nahi badhana. Config::validate() startup pe
 //! panic karta hai agar koi unhe cross kare.
+//!
+//! M4/M5.0.1: FFmpeg settings, delivery retry count aur environment variable
+//! ke naam bhi yahin hain. Secrets (token, key) kabhi yahan likhe nahi jate,
+//! sirf unke env-var ke naam yahan hain; value Render ke environment se aati hai.
 
 // ---- Hard limits (document §3, §11) — never raise ----
 pub const HARD_MAX_CACHE_BYTES: usize = 150 * 1024 * 1024;
 pub const HARD_MAX_FRAME_BUFFERS: usize = 3;
+
+// ---- Environment variable names (values Render dashboard se aayengi) ----
+/// Shared secret, request header X-Engine-Key se match hota hai (§6).
+pub const ENGINE_KEY_ENV: &str = "ENGINE_KEY";
+/// Telegram bot token. Repo mein kabhi nahi.
+pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+/// Telegram group ka chat id (group ke liye negative number hota hai).
+pub const TELEGRAM_CHAT_ID_ENV: &str = "TELEGRAM_CHAT_ID";
+/// Render free service ko ek HTTP port chahiye, wo is variable mein aata hai.
+pub const PORT_ENV: &str = "PORT";
+/// Port jab PORT env set na ho (local test).
+pub const DEFAULT_PORT: u16 = 8080;
 
 /// Tunable engine defaults. Section 15.
 #[derive(Debug, Clone, Copy)]
@@ -22,6 +38,14 @@ pub struct Config {
     pub skin_base_height: u32,
     pub asset_cache_bytes: usize,
     pub frame_buffer_count: usize,
+    /// FFmpeg binary ka naam ya path (Dockerfile mein PATH pe rakhenge).
+    pub ffmpeg_path: &'static str,
+    /// FFmpeg preset (§12: ultrafast).
+    pub ffmpeg_preset: &'static str,
+    /// H.264 quality, 0 (best) se 51 (worst). Test se tay hoga.
+    pub ffmpeg_crf: u32,
+    /// Piece bhejne ki koshishein (§13: 3 baar retry).
+    pub delivery_retries: u32,
 }
 
 impl Default for Config {
@@ -35,6 +59,10 @@ impl Default for Config {
             skin_base_height: 400,
             asset_cache_bytes: 150 * 1024 * 1024,
             frame_buffer_count: 3,
+            ffmpeg_path: "ffmpeg",
+            ffmpeg_preset: "ultrafast",
+            ffmpeg_crf: 28,
+            delivery_retries: 3,
         }
     }
 }
@@ -59,6 +87,10 @@ impl Config {
         assert!(self.piece_sec > 0.0, "piece_sec must be > 0");
         assert!(self.default_duration_sec > 0.0, "default_duration_sec must be > 0");
         assert!(self.skin_base_height > 0, "skin_base_height must be > 0");
+        assert!(!self.ffmpeg_path.is_empty(), "ffmpeg_path must not be empty");
+        assert!(!self.ffmpeg_preset.is_empty(), "ffmpeg_preset must not be empty");
+        assert!(self.ffmpeg_crf <= 51, "ffmpeg_crf must be 0..=51");
+        assert!(self.delivery_retries > 0, "delivery_retries must be > 0");
     }
 
     /// Ek RGBA frame buffer ke bytes.
@@ -82,6 +114,15 @@ mod tests {
         assert_eq!(c.skin_base_height, 400);
         assert_eq!(c.asset_cache_bytes, 150 * 1024 * 1024);
         assert_eq!(c.frame_buffer_count, 3);
+    }
+
+    #[test]
+    fn ffmpeg_and_delivery_defaults() {
+        let c = Config::default();
+        assert_eq!(c.ffmpeg_path, "ffmpeg");
+        assert_eq!(c.ffmpeg_preset, "ultrafast");
+        assert_eq!(c.ffmpeg_crf, 28);
+        assert_eq!(c.delivery_retries, 3);
     }
 
     #[test]
@@ -118,6 +159,14 @@ mod tests {
     fn zero_video_size_panics() {
         let mut c = Config::default();
         c.video_width = 0;
+        c.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "ffmpeg_crf must be 0..=51")]
+    fn crf_above_51_panics() {
+        let mut c = Config::default();
+        c.ffmpeg_crf = 52;
         c.validate();
     }
 

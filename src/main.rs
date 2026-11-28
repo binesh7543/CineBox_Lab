@@ -1,16 +1,27 @@
-//! M2 CLI: JSON -> multiple PNG frames.
+//! Engine entry point: CLI (PNG frames ya MP4 pieces) aur server mode.
 //!
-//! M3 Update:
-//!   - Camera pan/tilt integrate ho gaya.
-//!   - Face (aankh/mooh) timeline se resolve hoke dynamically load ho raha hai.
+//! M3: camera pan/tilt aur face (aankh/mooh) timeline se resolve hote hain.
+//! M4: --video flag: frames PNG ke bajaye FFmpeg ko jate hain, har piece_sec
+//!     (5 sec) ka ek piece_NNN.mp4 banta hai.
+//! M5.0.1: --serve flag: HTTP API (api.rs). Render ka kaam yahi se hota hai
+//!     (render_job_pieces), piece ready hote hi callback se Telegram delivery.
+//!
+//! Usage:
+//!   lkj-engine <job.json> <out_dir> [assets_root]            -> PNG frames (pehle jaisa)
+//!   lkj-engine <job.json> <out_dir> [assets_root] --video    -> piece_NNN.mp4 files
+//!   lkj-engine --serve [assets_root] [work_dir]              -> HTTP server
 
+mod api;
 mod assets;
 mod camera;
 mod compositor;
 mod config;
+mod delivery;
+mod encoder;
 mod face;
 mod json_stream;
 mod skeleton;
+mod status;
 mod timeline;
 mod types;
 
@@ -33,23 +44,63 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: {} <job.json> <out_dir> [assets_root]", args[0]);
-        std::process::exit(2);
-    }
-    let job_path = PathBuf::from(&args[1]);
-    let out_dir = PathBuf::from(&args[2]);
-    let assets_root = args.get(3).cloned().unwrap_or_else(|| ".".to_string());
-
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| format!("create out_dir {}: {e}", out_dir.display()))?;
+    let raw: Vec<String> = std::env::args().collect();
+    let prog = raw.first().cloned().unwrap_or_else(|| "lkj-engine".to_string());
+    let video_mode = raw.iter().any(|a| a == "--video");
+    let serve_mode = raw.iter().any(|a| a == "--serve");
+    // Flags hata ke sirf positional arguments.
+    let args: Vec<String> = raw
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .collect();
 
     let cfg = Config::default();
     cfg.validate();
 
+    if serve_mode {
+        let assets_root = PathBuf::from(args.first().cloned().unwrap_or_else(|| ".".to_string()));
+        let work_dir = PathBuf::from(
+            args.get(1)
+                .cloned()
+                .unwrap_or_else(|| "/tmp/lkj_jobs".to_string()),
+        );
+        return api::serve(cfg, assets_root, work_dir);
+    }
+
+    if args.len() < 2 {
+        eprintln!("usage: {prog} <job.json> <out_dir> [assets_root] [--video]");
+        eprintln!("       {prog} --serve [assets_root] [work_dir]");
+        std::process::exit(2);
+    }
+    let job_path = PathBuf::from(&args[0]);
+    let out_dir = PathBuf::from(&args[1]);
+    let assets_root = args.get(2).cloned().unwrap_or_else(|| ".".to_string());
+
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("create out_dir {}: {e}", out_dir.display()))?;
+
     let job = load_job(&job_path)?;
-    render_job_frames(&job, &cfg, Path::new(&assets_root), &out_dir)?;
+
+    if video_mode {
+        if !encoder::ffmpeg_available(cfg.ffmpeg_path) {
+            return Err(format!("ffmpeg not found (looked for '{}')", cfg.ffmpeg_path));
+        }
+        let n = render_job_pieces(
+            &job,
+            &cfg,
+            Path::new(&assets_root),
+            &out_dir,
+            &mut |piece, path| {
+                println!("piece {} ready: {}", piece, path.display());
+                Ok(())
+            },
+        )?;
+        println!("{} piece(s) written to {}", n, out_dir.display());
+    } else {
+        render_job_frames(&job, &cfg, Path::new(&assets_root), &out_dir)?;
+    }
     Ok(())
 }
 
@@ -68,19 +119,156 @@ fn dummy_image() -> Arc<CachedImage> {
     })
 }
 
+/// Total frames: duration * fps (upar ki taraf).
+fn total_frames(job: &Job, cfg: &Config) -> u32 {
+    let fps = job.video.fps.unwrap_or(cfg.fps);
+    let duration = job.video.duration_sec.unwrap_or(1.0);
+    (duration * fps as f32).ceil() as u32
+}
+
+/// Is job ke kitne pieces banenge (api.rs status ke liye pehle se batata hai).
+pub(crate) fn count_pieces(job: &Job, cfg: &Config) -> u32 {
+    let fps = job.video.fps.unwrap_or(cfg.fps);
+    let piece_sec = job.video.piece_sec.unwrap_or(cfg.piece_sec);
+    let per = encoder::frames_per_piece(fps, piece_sec);
+    let total = total_frames(job, cfg);
+    ((total + per - 1) / per).max(1)
+}
+
+/// PNG mode: har frame ek PNG file (M1/M2 jaisa).
 fn render_job_frames(
     job: &Job,
     cfg: &Config,
     assets_root: &Path,
     out_dir: &Path,
 ) -> Result<(), String> {
+    render_frames_with(job, cfg, assets_root, |frame_idx, frame| {
+        let out_path = out_dir.join(format!("frame_{:03}.png", frame_idx));
+        save_png(frame, &out_path)
+    })
+}
+
+/// Video mode: frames FFmpeg ko, har piece ki MP4 `out_dir` mein.
+/// Piece band hote hi `on_piece(piece_number, mp4_path)` call hota hai.
+/// Kitne pieces bane wo wapas deta hai.
+pub(crate) fn render_job_pieces(
+    job: &Job,
+    cfg: &Config,
+    assets_root: &Path,
+    out_dir: &Path,
+    on_piece: &mut dyn FnMut(u32, &Path) -> Result<(), String>,
+) -> Result<u32, String> {
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("create out_dir {}: {e}", out_dir.display()))?;
     let (vid_w, vid_h) = effective_video(job, cfg);
     let fps = job.video.fps.unwrap_or(cfg.fps);
-    let duration = job.video.duration_sec.unwrap_or(1.0);
-    let total_frames = (duration * fps as f32).ceil() as u32;
+    let piece_sec = job.video.piece_sec.unwrap_or(cfg.piece_sec);
+
+    let mut sink = PieceSink::new(cfg, out_dir, vid_w, vid_h, fps, piece_sec);
+    render_frames_with(job, cfg, assets_root, |frame_idx, frame| {
+        sink.push_frame(frame_idx, &frame.rgba, &mut *on_piece)
+    })?;
+    let n = sink.finish(&mut *on_piece)?;
+    if n == 0 {
+        return Err("job has no frames (duration_sec too small)".to_string());
+    }
+    Ok(n)
+}
+
+/// Frames ko pieces mein baantta hai: har piece ke liye ek PieceEncoder.
+struct PieceSink {
+    cfg: Config,
+    out_dir: PathBuf,
+    width: u32,
+    height: u32,
+    fps: u32,
+    piece_sec: f32,
+    current: Option<(u32, PathBuf, encoder::PieceEncoder)>,
+    pieces_done: u32,
+}
+
+impl PieceSink {
+    fn new(cfg: &Config, out_dir: &Path, width: u32, height: u32, fps: u32, piece_sec: f32) -> Self {
+        // FFmpeg ko job ka fps chahiye, config ka nahi.
+        let mut c = *cfg;
+        c.fps = fps;
+        Self {
+            cfg: c,
+            out_dir: out_dir.to_path_buf(),
+            width,
+            height,
+            fps,
+            piece_sec,
+            current: None,
+            pieces_done: 0,
+        }
+    }
+
+    /// Chalu piece band karo, aur on_piece se batao.
+    fn close_current(
+        &mut self,
+        on_piece: &mut dyn FnMut(u32, &Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if let Some((piece, path, enc)) = self.current.take() {
+            enc.finish().map_err(|e| format!("piece {}: {}", piece, e))?;
+            self.pieces_done += 1;
+            on_piece(piece, &path)?;
+        }
+        Ok(())
+    }
+
+    fn push_frame(
+        &mut self,
+        frame_idx: u32,
+        rgba: &[u8],
+        on_piece: &mut dyn FnMut(u32, &Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let piece = encoder::piece_for_frame(frame_idx, self.fps, self.piece_sec);
+        let need_new = match &self.current {
+            Some((p, _, _)) => *p != piece,
+            None => true,
+        };
+        if need_new {
+            self.close_current(&mut *on_piece)?;
+            let path = self.out_dir.join(encoder::piece_file_name(piece));
+            let enc = encoder::PieceEncoder::start(&self.cfg, self.width, self.height, &path)?;
+            self.current = Some((piece, path, enc));
+        }
+        if let Some((_, _, enc)) = self.current.as_mut() {
+            enc.write_frame(rgba)?;
+        }
+        Ok(())
+    }
+
+    /// Aakhri piece band karo. Kitne pieces bane wo wapas.
+    fn finish(
+        mut self,
+        on_piece: &mut dyn FnMut(u32, &Path) -> Result<(), String>,
+    ) -> Result<u32, String> {
+        self.close_current(&mut *on_piece)?;
+        Ok(self.pieces_done)
+    }
+}
+
+/// Saare frames render karta hai; har frame ban ke `on_frame` ko milta hai
+/// (PNG save ya FFmpeg pipe). Frame buffer har baar reuse hota hai (§11).
+fn render_frames_with<F>(
+    job: &Job,
+    cfg: &Config,
+    assets_root: &Path,
+    mut on_frame: F,
+) -> Result<(), String>
+where
+    F: FnMut(u32, &FrameBuffer) -> Result<(), String>,
+{
+    let (vid_w, vid_h) = effective_video(job, cfg);
+    let fps = job.video.fps.unwrap_or(cfg.fps);
+    let total_frames = total_frames(job, cfg);
 
     let mut loader = AssetLoader::new(assets_root.to_path_buf(), cfg.asset_cache_bytes);
-    let bg = loader.load(&job.background.asset, 1.0).map_err(|e| format!("background '{}': {e}", job.background.asset))?;
+    let bg = loader
+        .load(&job.background.asset, 1.0)
+        .map_err(|e| format!("background '{}': {e}", job.background.asset))?;
 
     let mut frame = FrameBuffer::new(vid_w, vid_h);
     let mut manifest_cache: HashMap<String, SkinManifest> = HashMap::new();
@@ -98,7 +286,7 @@ fn render_job_frames(
 
     for frame_idx in 0..total_frames {
         let t = frame_idx as f32 / fps as f32;
-        
+
         let cam = resolve_camera(job, t);
         let crop = camera::window(&cam, (bg.width, bg.height), (vid_w, vid_h));
         let mut poses: Vec<ResolvedPose> = Vec::with_capacity(job.characters.len());
@@ -108,19 +296,23 @@ fn render_job_frames(
             let images = &image_cache[&ch.id];
 
             let state = timeline::get_character_state(job, &ch.id, (ch.x, ch.y), t);
-            
+
             // M3: Face State resolve karo
             let face_state = face::resolve_face_state(job, &ch.id, t);
             let face_assets = face::resolve_face(&ch.skin, &face_state);
-            
+
             // Clone image map aur face images dynamically inject karo
             let mut current_images = images.clone();
             if manifest.parts.contains_key("face_eyes") {
-                let img = loader.load(&face_assets.eyes, ch.height).unwrap_or_else(|_| dummy_image());
+                let img = loader
+                    .load(&face_assets.eyes, ch.height)
+                    .unwrap_or_else(|_| dummy_image());
                 current_images.insert("FACE_EYES".to_string(), img);
             }
             if manifest.parts.contains_key("face_mouth") {
-                let img = loader.load(&face_assets.mouth, ch.height).unwrap_or_else(|_| dummy_image());
+                let img = loader
+                    .load(&face_assets.mouth, ch.height)
+                    .unwrap_or_else(|_| dummy_image());
                 current_images.insert("FACE_MOUTH".to_string(), img);
             }
 
@@ -139,8 +331,7 @@ fn render_job_frames(
 
         let merged = merge_poses(poses);
         compose_frame(&mut frame, &bg, &crop, &merged);
-        let out_path = out_dir.join(format!("frame_{:03}.png", frame_idx));
-        save_png(&frame, &out_path)?;
+        on_frame(frame_idx, &frame)?;
     }
 
     Ok(())
@@ -192,7 +383,7 @@ fn resolve_camera(job: &Job, t: f32) -> Camera {
                 let dur = cam_ev.dur.max(0.001);
                 let progress = ((t - ev.t) / dur).clamp(0.0, 1.0);
                 let dist = cam_ev.amount * progress;
-                
+
                 match cam_ev.move_dir.as_str() {
                     "E" => pan_x += dist,
                     "W" => pan_x -= dist,
@@ -271,11 +462,57 @@ mod tests {
         });
 
         let cam1 = resolve_camera(&job, 1.0); // Mid-pan
-        assert_eq!(cam1.pan_x, 50.0); 
-        assert_eq!(cam1.pan_y, 50.0); 
+        assert_eq!(cam1.pan_x, 50.0);
+        assert_eq!(cam1.pan_y, 50.0);
 
         let cam2 = resolve_camera(&job, 3.0); // End-pan
         assert_eq!(cam2.pan_x, 100.0);
         assert_eq!(cam2.pan_y, 50.0);
+    }
+
+    #[test]
+    fn count_pieces_full_and_partial() {
+        let cfg = Config::default();
+        let mut job = dummy_job();
+        // 20 sec * 15 fps = 300 frames, 75 per piece -> 4 pieces.
+        job.video.duration_sec = Some(20.0);
+        assert_eq!(count_pieces(&job, &cfg), 4);
+        // 6 sec = 90 frames -> 2 pieces (75 + 15).
+        job.video.duration_sec = Some(6.0);
+        assert_eq!(count_pieces(&job, &cfg), 2);
+        // Job ka apna piece_sec.
+        job.video.duration_sec = Some(10.0);
+        job.video.piece_sec = Some(2.0);
+        assert_eq!(count_pieces(&job, &cfg), 5);
+    }
+
+    #[test]
+    fn piece_sink_splits_frames_into_pieces() {
+        let cfg = Config::default();
+        if !encoder::ffmpeg_available(cfg.ffmpeg_path) {
+            eprintln!("ffmpeg not found, skipping piece_sink_splits_frames_into_pieces");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("lkj_sink_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (64u32, 64u32);
+        // fps 10, piece 1 sec = 10 frames per piece; 25 frames -> 3 pieces.
+        let mut sink = PieceSink::new(&cfg, &dir, w, h, 10, 1.0);
+        let frame = vec![128u8; (w * h * 4) as usize];
+        let mut seen: Vec<u32> = Vec::new();
+        {
+            let mut on_piece = |piece: u32, path: &Path| -> Result<(), String> {
+                assert!(path.exists(), "piece file missing: {}", path.display());
+                seen.push(piece);
+                Ok(())
+            };
+            for i in 0..25u32 {
+                sink.push_frame(i, &frame, &mut on_piece).unwrap();
+            }
+            let n = sink.finish(&mut on_piece).unwrap();
+            assert_eq!(n, 3);
+        }
+        assert_eq!(seen, vec![0, 1, 2]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
